@@ -7,6 +7,17 @@ export type Figures = {
   startedAt: number
 }
 
+export type LastTurn = {
+  reason: string
+  wallMs?: number
+  engineMs?: number
+  usd?: number
+  input?: number
+  output?: number
+  cacheRead?: number
+  answerChars: number
+}
+
 export type Breakdown = {
   categories: { name: string; tokens: number; color: string; kind: string }[]
   grid: { color: string; isFilled: boolean }[][]
@@ -17,6 +28,6 @@ export type Breakdown = {
 
 declare module 'claude-code' {
   interface PluginState {
-    'status-right': { figures: Figures | null; lastPrompt: number | null; lastTurnMs: number | null; breakdown: Breakdown | null; palette: number }
+    'status-bar': { figures: Figures | null; lastPrompt: number | null; costAtPrompt: number | null; lastTurn: LastTurn | null; breakdown: Breakdown | null; palette: number }
   }
 }

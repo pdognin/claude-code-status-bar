@@ -1,1 +1,1 @@
-{ "name": "status-right", "version": "0.2.0", "description": "A right-aligned band above the prompt showing context fill and session cost", "types": "./types/index.d.ts" }
+{ "name": "status-bar", "version": "0.2.0", "description": "A right-aligned band above the prompt showing context fill and session cost", "types": "./types/index.d.ts" }
