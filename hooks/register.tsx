@@ -21,6 +21,9 @@ const REASONS: Record<string, string | undefined> = {
 // What each field shows, drawn on the line under the bar while it is hovered.
 const TIPS: Record<string, string> = {
   time: 'Time your last prompt was submitted.',
+  clock: 'The current time, ticking every second.',
+  net_title: 'Connection stats: the model API link.',
+  last_title: 'Stats for the last prompt.',
   model: 'The model answering this session.',
   dir: 'Current working directory.',
   branch: 'Current git branch.',
@@ -458,6 +461,7 @@ export const register: Register = on => {
     const recentErr = n.lastErrorAt !== undefined && now - n.lastErrorAt < 10 * 60000
     const netColor = waiting !== undefined ? (waiting > VERY_SLOW_MS ? '#e06c75' : waiting > SLOW_MS ? '#e5c07b' : '#61afef') : recentErr ? '#e06c75' : '#98c379'
     const netFields = [
+            field('net_title', <Text dimColor>🌐 connection stats</Text>),
             field(
               'net_last',
               waiting !== undefined ? (
@@ -466,7 +470,7 @@ export const register: Register = on => {
                   {n.firstAt === undefined && waiting > SLOW_MS ? ' — provider slow?' : ''}
                 </Text>
               ) : (
-                <Text color={netColor}>{recentErr ? '🔴' : '🌐'} {n.lastMs !== undefined ? duration(n.lastMs) : '–'}</Text>
+                <Text color={netColor}>{recentErr ? '🔴 ' : ''}{n.lastMs !== undefined ? duration(n.lastMs) : '–'}</Text>
               ),
             ),
             n.lastTtftMs !== undefined && field('net_ttft', <Text dimColor>1st token {duration(n.lastTtftMs)}</Text>),
@@ -551,6 +555,7 @@ export const register: Register = on => {
         {rule}
         {split(
           line(
+            field('clock', <Text dimColor>🕰️ {new Date(now).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</Text>),
             field('model', <Text color="#5fd7d7">[{modelName(f.model)}]</Text>),
             field('dir', <Text>📁 {f.dir}</Text>),
             f.branch !== undefined && field('branch', <Text>🌿 {f.branch}</Text>),
@@ -569,7 +574,8 @@ export const register: Register = on => {
         {netFields && line(...netFields)}
         {split(
           line(
-            field('time', <Text dimColor>🕰️ {promptAt === null ? '--:--' : new Date(promptAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</Text>),
+            field('last_title', <Text dimColor>⏱️ last prompt stats</Text>),
+            field('time', <Text dimColor>{promptAt === null ? '--:--' : new Date(promptAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</Text>),
             field('turn', <Text color={t ? '#abb2bf' : undefined} dimColor={!t}>{turn ?? '⚡ 0.0s · $0.00'}</Text>),
             why && field('why', <Text color="#e06c75">{why}</Text>),
             field('tokens', <Text dimColor>↑{short(t?.input ?? 0)} ↓{short(t?.output ?? 0)}</Text>),
