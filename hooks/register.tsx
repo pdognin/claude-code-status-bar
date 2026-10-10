@@ -124,6 +124,13 @@ const VERY_SLOW_MS = 30000
 
 const short = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${n}`)
 
+// The last weekly limit the bar saw, while that week is still running.
+async function savedWeekly($: EngineInterface) {
+  const [percent, resetsAt] = [await $.store.get('weekPercent'), Number(await $.store.get('weekResets')) || undefined]
+  if (percent === undefined || percent === null || (resetsAt !== undefined && resetsAt <= Date.now())) return undefined
+  return { percent: Number(percent), resetsAt, usd: Number(await $.store.get('weekUsd')) || 0 }
+}
+
 // Reads the session figures the bar draws, at start and after every turn;
 // resolves the session cost.
 async function refreshFigures($: EngineInterface) {
@@ -143,7 +150,7 @@ async function refreshFigures($: EngineInterface) {
   const git = await $.process.run(['git', 'branch', '--show-current']).catch(() => undefined)
   const branch = git?.exitCode === 0 ? git.stdout.trim() || undefined : undefined
   const week = rateLimits.find(r => r.kind === 'seven_day')
-  const weekly = week && { percent: week.percentUsed, resetsAt: week.resetsAt && Number.isFinite(Date.parse(week.resetsAt)) ? Date.parse(week.resetsAt) : undefined }
+  let weekly = week && { percent: week.percentUsed, resetsAt: week.resetsAt && Number.isFinite(Date.parse(week.resetsAt)) ? Date.parse(week.resetsAt) : undefined }
   // The engine has no weekly cost, so add each session's new spend to a total kept
   // in the store, started afresh when the weekly limit resets.
   let weekUsd = Number(await $.store.get('weekUsd')) || 0
@@ -157,6 +164,12 @@ async function refreshFigures($: EngineInterface) {
     weekUsd += Math.max(0, cost.usd - (countedUsd ?? cost.usd))
     countedUsd = cost.usd
     await $.store.set('weekUsd', weekUsd)
+  }
+  // Keep the last known weekly limit so the bar has figures before the engine reports one.
+  if (weekly) {
+    await $.store.set('weekPercent', weekly.percent)
+  } else {
+    weekly = await savedWeekly($)
   }
   await update($, figures, () => ({ weekly: weekly && { ...weekly, usd: weekUsd }, ctx: context.percent, usd: cost?.usd, model, dir, branch, startedAt }))
   return cost?.usd
@@ -322,7 +335,7 @@ export const register: Register = on => {
       model: await $.session.model().catch(() => ''),
       dir: (await $.session.cwd().catch(() => '')).split('/').pop() || '/',
       branch: undefined,
-      weekly: undefined,
+      weekly: await savedWeekly($),
       startedAt: await $.clock.now(),
     }
 
@@ -481,12 +494,16 @@ export const register: Register = on => {
     const toolsNode =
       field(
         'tools',
-        <Text>
-          🔧 {pt.calls} {chips(pt.rows, 5)}
-          {more(pt.rows, 5)}
-          <Text color="#98c379"> ✓{pt.calls - pt.errors}</Text>
-          <Text color={pt.errors > 0 ? '#e06c75' : undefined} dimColor={pt.errors === 0}> ✗{pt.errors}</Text>
-        </Text>,
+        st.calls === 0 ? (
+          <Text dimColor>🔧 no tool calls yet</Text>
+        ) : (
+          <Text>
+            🔧 {pt.calls} {chips(pt.rows, 5)}
+            {more(pt.rows, 5)}
+            <Text color="#98c379"> ✓{pt.calls - pt.errors}</Text>
+            <Text color={pt.errors > 0 ? '#e06c75' : undefined} dimColor={pt.errors === 0}> ✗{pt.errors}</Text>
+          </Text>
+        ),
       )
     const totalsNode =
       field(
@@ -534,7 +551,6 @@ export const register: Register = on => {
         {rule}
         {split(
           line(
-            field('time', <Text dimColor>{promptAt === null ? '--:--' : new Date(promptAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</Text>),
             field('model', <Text color="#5fd7d7">[{modelName(f.model)}]</Text>),
             field('dir', <Text>📁 {f.dir}</Text>),
             f.branch !== undefined && field('branch', <Text>🌿 {f.branch}</Text>),
@@ -553,6 +569,7 @@ export const register: Register = on => {
         {netFields && line(...netFields)}
         {split(
           line(
+            field('time', <Text dimColor>🕰️ {promptAt === null ? '--:--' : new Date(promptAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</Text>),
             field('turn', <Text color={t ? '#abb2bf' : undefined} dimColor={!t}>{turn ?? '⚡ 0.0s · $0.00'}</Text>),
             why && field('why', <Text color="#e06c75">{why}</Text>),
             field('tokens', <Text dimColor>↑{short(t?.input ?? 0)} ↓{short(t?.output ?? 0)}</Text>),
