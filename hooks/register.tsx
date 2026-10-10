@@ -464,18 +464,20 @@ export const register: Register = on => {
             n.errors > 0 && field('net_failed', <Text color="#e06c75">{n.errors} failed</Text>),
             recentErr && field('net_err', <Text color="#e06c75">{Math.round((now - n.lastErrorAt!) / 60000)}m ago: {n.lastError}</Text>),
           ]
-    const weeklyNode =
-      f.weekly !== undefined &&
-      field(
-        'weekly',
+    const weeklyNode = field(
+      'weekly',
+      f.weekly === undefined ? (
+        <Text dimColor>📅 week – · no weekly limit data</Text>
+      ) : (
         <Text color={f.weekly.percent >= 90 ? '#e06c75' : f.weekly.percent >= 70 ? '#e5c07b' : '#98c379'}>
           📅 week {f.weekly.percent}%
           {f.weekly.usd !== undefined && <Text color="#e5c07b"> · ${f.weekly.usd.toFixed(2)}</Text>}
           {f.weekly.resetsAt !== undefined && (
             <Text dimColor> · resets in {span(f.weekly.resetsAt - now)} ({new Date(f.weekly.resetsAt).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' })})</Text>
           )}
-        </Text>,
-      )
+        </Text>
+      ),
+    )
     const toolsNode =
       field(
         'tools',
@@ -492,7 +494,7 @@ export const register: Register = on => {
         <Text dimColor>
           Σ {nPrompts} prompt{nPrompts === 1 ? '' : 's'} · {st.calls} tool calls
           {okPct !== undefined && ` (${okPct}% ok)`}
-          {f.usd !== undefined && ` · avg $${(f.usd / nPrompts).toFixed(2)}/prompt`}
+          {f.usd !== undefined && nPrompts > 0 && ` · avg $${(f.usd / nPrompts).toFixed(2)}/prompt`}
           {st.rows.length > 0 && ` · top: ${st.rows.slice(0, 3).map(r => `${r.name}×${r.n}`).join(' ')}`}
         </Text>,
       )
