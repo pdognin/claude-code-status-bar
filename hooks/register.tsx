@@ -460,27 +460,29 @@ export const register: Register = on => {
     const worst = n.recent.length > 0 ? Math.max(...n.recent) : undefined
     const recentErr = n.lastErrorAt !== undefined && now - n.lastErrorAt < 10 * 60000
     const netColor = waiting !== undefined ? (waiting > VERY_SLOW_MS ? '#e06c75' : waiting > SLOW_MS ? '#e5c07b' : '#61afef') : recentErr ? '#e06c75' : '#98c379'
-    const netFields = [
-            field('net_title', <Text dimColor>{n.reqs === 0 && n.inflight === undefined ? '🌐 connection stats' : '🌐'}</Text>),
-            field(
-              'net_last',
-              waiting !== undefined ? (
-                <Text color={netColor}>
-                  {waiting > SLOW_MS ? '🐌' : '⏳'} {n.firstAt === undefined ? 'waiting' : 'streaming'} {duration(waiting)}
-                  {n.firstAt === undefined && waiting > SLOW_MS ? ' — provider slow?' : ''}
-                </Text>
-              ) : (
-                <Text color={netColor}>{recentErr ? '🔴 ' : ''}{n.lastMs !== undefined ? duration(n.lastMs) : '–'}</Text>
-              ),
-            ),
-            n.lastTtftMs !== undefined && field('net_ttft', <Text dimColor>1st token {duration(n.lastTtftMs)}</Text>),
-            avg !== undefined && field('net_avg', <Text dimColor>avg {duration(avg)}</Text>),
-            worst !== undefined && field('net_max', <Text dimColor>max {duration(worst)}</Text>),
-            field('net_req', <Text dimColor>{n.reqs} req</Text>),
-            n.slow > 0 && field('net_slow', <Text color="#e5c07b">{n.slow} slow</Text>),
-            n.errors > 0 && field('net_failed', <Text color="#e06c75">{n.errors} failed</Text>),
-            recentErr && field('net_err', <Text color="#e06c75">{Math.round((now - n.lastErrorAt!) / 60000)}m ago: {n.lastError}</Text>),
-          ]
+    const started = nPrompts > 0 || n.reqs > 0 || n.inflight !== undefined || t !== undefined
+    const netStats = [
+      field(
+        'net_last',
+        waiting !== undefined ? (
+          <Text color={netColor}>
+            {waiting > SLOW_MS ? '🐌' : '⏳'} {n.firstAt === undefined ? 'waiting' : 'streaming'} {duration(waiting)}
+            {n.firstAt === undefined && waiting > SLOW_MS ? ' — provider slow?' : ''}
+          </Text>
+        ) : (
+          <Text color={netColor}>{recentErr ? '🔴 ' : ''}{n.lastMs !== undefined ? duration(n.lastMs) : '–'}</Text>
+        ),
+      ),
+      n.lastTtftMs !== undefined && field('net_ttft', <Text dimColor>1st token {duration(n.lastTtftMs)}</Text>),
+      avg !== undefined && field('net_avg', <Text dimColor>avg {duration(avg)}</Text>),
+      worst !== undefined && field('net_max', <Text dimColor>max {duration(worst)}</Text>),
+      field('net_req', <Text dimColor>{n.reqs} req</Text>),
+      n.slow > 0 && field('net_slow', <Text color="#e5c07b">{n.slow} slow</Text>),
+      n.errors > 0 && field('net_failed', <Text color="#e06c75">{n.errors} failed</Text>),
+      recentErr && field('net_err', <Text color="#e06c75">{Math.round((now - n.lastErrorAt!) / 60000)}m ago: {n.lastError}</Text>),
+    ]
+    // Until the first prompt, only the label shows; afterwards just the icon and the stats.
+    const title = (key: string, icon: string, label: string) => field(key, <Text dimColor>{started ? icon : `${icon} ${label}`}</Text>)
     const weeklyNode = field(
       'weekly',
       f.weekly === undefined ? (
@@ -550,6 +552,15 @@ export const register: Register = on => {
         (t.wallMs !== undefined && t.engineMs !== undefined ? ` [${duration(t.engineMs)}]` : '') +
         (t.usd === undefined ? '' : ` · $${t.usd.toFixed(2)}`)
 
+    const lastStats = [
+          field('time', <Text dimColor>{promptAt === null ? '--:--' : new Date(promptAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</Text>),
+          field('turn', <Text color={t ? '#abb2bf' : undefined} dimColor={!t}>{turn ?? '⚡ 0.0s · $0.00'}</Text>),
+          why && field('why', <Text color="#e06c75">{why}</Text>),
+          field('tokens', <Text dimColor>↑{short(t?.input ?? 0)} ↓{short(t?.output ?? 0)}</Text>),
+          field('cache', <Text dimColor>cache {cachePct ?? 0}%</Text>),
+          field('answer', <Text dimColor>💬 {short(t?.answerChars ?? 0)}</Text>),
+    ]
+
     return (
       <Box flexDirection="column">
         {rule}
@@ -571,23 +582,13 @@ export const register: Register = on => {
           ),
           totalsNode,
         )}
-        {netFields && line(...netFields)}
-        {split(
-          line(
-            field('last_title', <Text dimColor>{t ? '⏱️' : '⏱️ last prompt stats'}</Text>),
-            field('time', <Text dimColor>{promptAt === null ? '--:--' : new Date(promptAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</Text>),
-            field('turn', <Text color={t ? '#abb2bf' : undefined} dimColor={!t}>{turn ?? '⚡ 0.0s · $0.00'}</Text>),
-            why && field('why', <Text color="#e06c75">{why}</Text>),
-            field('tokens', <Text dimColor>↑{short(t?.input ?? 0)} ↓{short(t?.output ?? 0)}</Text>),
-            field('cache', <Text dimColor>cache {cachePct ?? 0}%</Text>),
-            field('answer', <Text dimColor>💬 {short(t?.answerChars ?? 0)}</Text>),
-          ),
-          toolsNode,
-        )}
+        {line(title('net_title', '🌐', 'connection stats'), ...(started ? netStats : []))}
+        {split(line(title('last_title', '⏱️', 'last prompt stats'), ...(started ? lastStats : [])), toolsNode)}
         {bottom}
       </Box>
     )
   })
+
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text, Button } = $.ui.resolve(e)
