@@ -4,7 +4,7 @@ import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 import type { NetStats } from '../types'
 
 const CELLS = 12
-const TRACK = '#3a3a3a'
+const TRACK = '#6b6b6b'
 const PANE = 'ctx-breakdown'
 const PALETTES = [
   { name: 'classic', stops: [[80, 200, 120], [240, 200, 60], [230, 70, 70]] },
@@ -32,7 +32,7 @@ const TIPS: Record<string, string> = {
   tokens: 'Tokens for the last turn: input (cache hits included) and output.',
   cache: "Share of the last turn's input served from the prompt cache.",
   cache_ttl: 'Prompt cache: time left before it goes cold (🔥 hot over 60% of the TTL left, 💨 cooling to 30%, 💧 melting below that, 🧊 cold), its TTL, and when it goes cold. Click to switch TTL 5m/1h. Each finished turn refreshes it.',
-  weekly: 'Weekly (7-day) usage limit: share used, and time left until it resets.',
+  weekly: 'Weekly (7-day) usage limit: share used, cost this week, and time left until it resets. The cost counts only spend this bar has seen (since it was installed), not other machines.',
   tools: 'Tool calls for this prompt, by tool (× count, red = failed or denied), and ✓ succeeded / ✗ failed.',
   totals: 'Whole session: prompts, tool calls with success rate, average cost per prompt, and the most used tools.',
   net_last: 'Model API: the live wait on the current request (waiting for the first token, then streaming), or how long the last request took. 🐌 and yellow past 15s, red past 30s.',
@@ -49,6 +49,8 @@ const TIPS: Record<string, string> = {
 }
 
 let activePalette = 0
+// session cost already counted into the weekly total; spend above it is new
+let countedUsd: number | undefined
 // counts the prompts; a tool call whose prompt differs from the stored one starts its counts afresh
 let promptSeq = 0
 const openRequests = new Map<number, { startedAt: number; firstAt?: number }>()
@@ -142,7 +144,21 @@ async function refreshFigures($: EngineInterface) {
   const branch = git?.exitCode === 0 ? git.stdout.trim() || undefined : undefined
   const week = rateLimits.find(r => r.kind === 'seven_day')
   const weekly = week && { percent: week.percentUsed, resetsAt: week.resetsAt && Number.isFinite(Date.parse(week.resetsAt)) ? Date.parse(week.resetsAt) : undefined }
-  await update($, figures, () => ({ weekly, ctx: context.percent, usd: cost?.usd, model, dir, branch, startedAt }))
+  // The engine has no weekly cost, so add each session's new spend to a total kept
+  // in the store, started afresh when the weekly limit resets.
+  let weekUsd = Number(await $.store.get('weekUsd')) || 0
+  const resets = weekly?.resetsAt
+  if (resets !== undefined && Number(await $.store.get('weekResets')) !== resets) {
+    weekUsd = 0
+    countedUsd = cost?.usd
+    await $.store.set('weekResets', resets)
+  }
+  if (cost?.usd !== undefined) {
+    weekUsd += Math.max(0, cost.usd - (countedUsd ?? cost.usd))
+    countedUsd = cost.usd
+    await $.store.set('weekUsd', weekUsd)
+  }
+  await update($, figures, () => ({ weekly: weekly && { ...weekly, usd: weekUsd }, ctx: context.percent, usd: cost?.usd, model, dir, branch, startedAt }))
   return cost?.usd
 }
 
@@ -160,7 +176,7 @@ export const register: Register = on => {
     await update($, palette, () => (Number.isInteger(savedPalette) && savedPalette >= 0 && savedPalette < PALETTES.length ? savedPalette : 0))
     const savedTtl = Number(await $.store.get('cacheTtl'))
     await update($, cacheTtl, () => (TTLS.includes(savedTtl) ? savedTtl : TTLS[0]!))
-    await refreshFigures($)
+    await refreshFigures($).catch(() => undefined)
     ticker?.cancel()
     ticker = $.clock.every(1000, () => update($, tick, n => n + 1))
     return next(e)
@@ -298,8 +314,17 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    const f = await read($, figures)
-    if (e.props.hasSurvey || f === null) return next(e)
+    if (e.props.hasSurvey) return next(e)
+    // before the first figures arrive, draw the bar with empty starting values
+    const f = (await read($, figures)) ?? {
+      ctx: 0,
+      usd: 0,
+      model: await $.session.model().catch(() => ''),
+      dir: (await $.session.cwd().catch(() => '')).split('/').pop() || '/',
+      branch: undefined,
+      weekly: undefined,
+      startedAt: await $.clock.now(),
+    }
 
     const { Box, Text, Button } = $.ui.resolve(e)
     const [isBar, isLine] = [await read($, barOn), await read($, lineOn)]
@@ -372,8 +397,8 @@ export const register: Register = on => {
       </Box>
     )
 
-    const ctx = f.ctx
-    const filled = Math.round((Math.min(ctx ?? 0, 100) / 100) * CELLS)
+    const ctx = Math.round(f.ctx ?? 0) // 0% until the first turn reports usage
+    const filled = Math.round((Math.min(ctx, 100) / 100) * CELLS)
     const cells = Array.from({ length: CELLS }, (_, i) => i)
     const elapsed = Math.max(0, Math.round((now - f.startedAt) / 1000))
     const cachePct = t?.input ? Math.round(((t.cacheRead ?? 0) / t.input) * 100) : undefined
@@ -386,13 +411,15 @@ export const register: Register = on => {
       share > 0.6 ? { icon: '🔥', color: '#98c379' }
       : share > 0.3 ? { icon: '💨', color: '#e5c07b' }
       : { icon: '💧', color: '#e06c75' }
-    const cacheNode = left !== undefined && (
+    const cacheNode = (
       <Button key="ttl" plain onPress={async () => {
         const chosen = ttl === TTLS[0] ? TTLS[1]! : TTLS[0]!
         await $.store.set('cacheTtl', chosen)
         await update($, cacheTtl, () => chosen)
       }}>
-        {left > 0 ? (
+        {left === undefined ? (
+          <Text dimColor>🧊 no cache yet · ttl {ttlLabel}</Text>
+        ) : left > 0 ? (
           <Text color={stage.color}>
             {stage.icon} {clock(left)} <Text dimColor>ttl {ttlLabel} · cold at {new Date(cacheStart! + ttl).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</Text>
           </Text>
@@ -417,9 +444,7 @@ export const register: Register = on => {
     const worst = n.recent.length > 0 ? Math.max(...n.recent) : undefined
     const recentErr = n.lastErrorAt !== undefined && now - n.lastErrorAt < 10 * 60000
     const netColor = waiting !== undefined ? (waiting > VERY_SLOW_MS ? '#e06c75' : waiting > SLOW_MS ? '#e5c07b' : '#61afef') : recentErr ? '#e06c75' : '#98c379'
-    const netFields =
-      n.reqs > 0 || waiting !== undefined
-        ? [
+    const netFields = [
             field(
               'net_last',
               waiting !== undefined ? (
@@ -439,20 +464,19 @@ export const register: Register = on => {
             n.errors > 0 && field('net_failed', <Text color="#e06c75">{n.errors} failed</Text>),
             recentErr && field('net_err', <Text color="#e06c75">{Math.round((now - n.lastErrorAt!) / 60000)}m ago: {n.lastError}</Text>),
           ]
-        : null
     const weeklyNode =
       f.weekly !== undefined &&
       field(
         'weekly',
         <Text color={f.weekly.percent >= 90 ? '#e06c75' : f.weekly.percent >= 70 ? '#e5c07b' : '#98c379'}>
           📅 week {f.weekly.percent}%
+          {f.weekly.usd !== undefined && <Text color="#e5c07b"> · ${f.weekly.usd.toFixed(2)}</Text>}
           {f.weekly.resetsAt !== undefined && (
             <Text dimColor> · resets in {span(f.weekly.resetsAt - now)} ({new Date(f.weekly.resetsAt).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' })})</Text>
           )}
         </Text>,
       )
     const toolsNode =
-      pt.calls > 0 &&
       field(
         'tools',
         <Text>
@@ -463,7 +487,6 @@ export const register: Register = on => {
         </Text>,
       )
     const totalsNode =
-      nPrompts > 0 &&
       field(
         'totals',
         <Text dimColor>
@@ -482,7 +505,7 @@ export const register: Register = on => {
     )
     const why = t && REASONS[t.reason]
 
-    const bar = ctx !== undefined && (
+    const bar = (
       <Button key="bar" plain onPress={async () => {
         const chosen = (activePalette + 1) % PALETTES.length
         await $.store.set('palette', chosen)
@@ -509,8 +532,7 @@ export const register: Register = on => {
         {rule}
         {split(
           line(
-            promptAt !== null &&
-              field('time', <Text dimColor>{new Date(promptAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</Text>),
+            field('time', <Text dimColor>{promptAt === null ? '--:--' : new Date(promptAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</Text>),
             field('model', <Text color="#5fd7d7">[{modelName(f.model)}]</Text>),
             field('dir', <Text>📁 {f.dir}</Text>),
             f.branch !== undefined && field('branch', <Text>🌿 {f.branch}</Text>),
@@ -520,7 +542,7 @@ export const register: Register = on => {
         {split(
           line(
             bar && field('ctx', bar),
-            f.usd !== undefined && field('cost', <Text color="#e5c07b">${f.usd.toFixed(2)}</Text>),
+            field('cost', <Text color="#e5c07b">${(f.usd ?? 0).toFixed(2)}</Text>),
             field('session', <Text>⏱️ {Math.floor(elapsed / 60)}m {elapsed % 60}s</Text>),
             cacheNode && field('cache_ttl', cacheNode),
           ),
@@ -529,11 +551,11 @@ export const register: Register = on => {
         {netFields && line(...netFields)}
         {split(
           line(
-            turn && field('turn', <Text color="#abb2bf">{turn}</Text>),
+            field('turn', <Text color={t ? '#abb2bf' : undefined} dimColor={!t}>{turn ?? '⚡ 0.0s · $0.00'}</Text>),
             why && field('why', <Text color="#e06c75">{why}</Text>),
-            t?.input !== undefined && field('tokens', <Text dimColor>↑{short(t.input)} ↓{short(t.output ?? 0)}</Text>),
-            cachePct !== undefined && field('cache', <Text dimColor>cache {cachePct}%</Text>),
-            t && field('answer', <Text dimColor>💬 {short(t.answerChars)}</Text>),
+            field('tokens', <Text dimColor>↑{short(t?.input ?? 0)} ↓{short(t?.output ?? 0)}</Text>),
+            field('cache', <Text dimColor>cache {cachePct ?? 0}%</Text>),
+            field('answer', <Text dimColor>💬 {short(t?.answerChars ?? 0)}</Text>),
           ),
           toolsNode,
         )}

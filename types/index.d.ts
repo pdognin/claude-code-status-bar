@@ -5,7 +5,7 @@ export type Figures = {
   dir: string
   branch?: string
   startedAt: number
-  weekly?: { percent: number; resetsAt?: number }
+  weekly?: { percent: number; resetsAt?: number; usd?: number }
 }
 
 export type LastTurn = {
