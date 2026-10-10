@@ -461,7 +461,7 @@ export const register: Register = on => {
     const recentErr = n.lastErrorAt !== undefined && now - n.lastErrorAt < 10 * 60000
     const netColor = waiting !== undefined ? (waiting > VERY_SLOW_MS ? '#e06c75' : waiting > SLOW_MS ? '#e5c07b' : '#61afef') : recentErr ? '#e06c75' : '#98c379'
     const netFields = [
-            field('net_title', <Text dimColor>🌐 connection stats</Text>),
+            field('net_title', <Text dimColor>{n.reqs === 0 && n.inflight === undefined ? '🌐 connection stats' : '🌐'}</Text>),
             field(
               'net_last',
               waiting !== undefined ? (
@@ -574,7 +574,7 @@ export const register: Register = on => {
         {netFields && line(...netFields)}
         {split(
           line(
-            field('last_title', <Text dimColor>⏱️ last prompt stats</Text>),
+            field('last_title', <Text dimColor>{t ? '⏱️' : '⏱️ last prompt stats'}</Text>),
             field('time', <Text dimColor>{promptAt === null ? '--:--' : new Date(promptAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</Text>),
             field('turn', <Text color={t ? '#abb2bf' : undefined} dimColor={!t}>{turn ?? '⚡ 0.0s · $0.00'}</Text>),
             why && field('why', <Text color="#e06c75">{why}</Text>),
