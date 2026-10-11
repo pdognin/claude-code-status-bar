@@ -460,7 +460,7 @@ export const register: Register = on => {
     const worst = n.recent.length > 0 ? Math.max(...n.recent) : undefined
     const recentErr = n.lastErrorAt !== undefined && now - n.lastErrorAt < 10 * 60000
     const netColor = waiting !== undefined ? (waiting > VERY_SLOW_MS ? '#e06c75' : waiting > SLOW_MS ? '#e5c07b' : '#61afef') : recentErr ? '#e06c75' : '#98c379'
-    const started = nPrompts > 0 || n.reqs > 0 || n.inflight !== undefined || t !== undefined
+    const started = nPrompts > 0 || n.reqs > 0 || n.inflight !== undefined || t != null
     const netStats = [
       field(
         'net_last',
@@ -470,7 +470,7 @@ export const register: Register = on => {
             {n.firstAt === undefined && waiting > SLOW_MS ? ' — provider slow?' : ''}
           </Text>
         ) : (
-          <Text color={netColor}>{recentErr ? '🔴 ' : ''}{n.lastMs !== undefined ? duration(n.lastMs) : '–'}</Text>
+          <Text color={netColor}>{recentErr ? '🔴 ' : ''}{n.lastMs !== undefined ? duration(n.lastMs) : '0.0s'}</Text>
         ),
       ),
       n.lastTtftMs !== undefined && field('net_ttft', <Text dimColor>1st token {duration(n.lastTtftMs)}</Text>),
@@ -582,8 +582,8 @@ export const register: Register = on => {
           ),
           totalsNode,
         )}
-        {line(title('net_title', '🌐', 'connection stats'), ...(started ? netStats : []))}
-        {split(line(title('last_title', '⏱️', 'last prompt stats'), ...(started ? lastStats : [])), toolsNode)}
+        {line(title('net_title', '🌐', 'connection stats'), ...netStats)}
+        {split(line(title('last_title', '⏱️', 'last prompt stats'), ...lastStats), toolsNode)}
         {bottom}
       </Box>
     )
