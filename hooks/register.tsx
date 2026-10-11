@@ -421,7 +421,8 @@ export const register: Register = on => {
 
     const ctx = Math.round(f.ctx ?? 0) // 0% until the first turn reports usage
     const bd = await read($, breakdown)
-    const ctxSize = `${tokens(bd?.total ?? 0)}/${bd?.max ? tokens(bd.max) : '–'}`
+    const ctxUsed = tokens(bd?.total ?? 0)
+    const ctxMax = bd?.max ? tokens(bd.max) : '–'
     const filled = Math.round((Math.min(ctx, 100) / 100) * CELLS)
     const cells = Array.from({ length: CELLS }, (_, i) => i)
     const elapsed = Math.max(0, Math.round((now - f.startedAt) / 1000))
@@ -544,15 +545,18 @@ export const register: Register = on => {
         await $.store.set('palette', chosen)
         await update($, palette, () => chosen)
       }}>
-        <Text color={filled > 0 ? gradient(0) : TRACK}>●</Text>
+        <Text color={gradient(0)}>●</Text>
         {cells.map(i => (
           <Text key={`c${i}`} color={i < filled ? gradient(i / (CELLS - 1)) : TRACK}>
             ▬
           </Text>
         ))}
-        <Text color={filled === CELLS ? gradient(1) : TRACK}>●</Text>
+        <Text color={gradient(1)}>●</Text>
         <Text color={gradient(ctx / 100)} bold> {ctx}%</Text>
-        <Text dimColor> · {ctxSize}</Text>
+        <Text dimColor> · </Text>
+        <Text color={gradient(ctx / 100)}>{ctxUsed}</Text>
+        <Text dimColor>/</Text>
+        <Text color={gradient(1)}>{ctxMax}</Text>
       </Button>
     )
     const turn =
