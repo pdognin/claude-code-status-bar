@@ -34,7 +34,7 @@ const TIPS: Record<string, string> = {
   why: 'Why the last turn ended: interrupted, refused by the model, or an API error.',
   tokens: 'Tokens for the last turn: input (cache hits included) and output.',
   cache: "Share of the last turn's input served from the prompt cache. wrote = tokens newly written to the cache (a miss, which costs more than a hit).",
-  pmodel: 'The model that answered the last prompt (it can differ from the session model after a switch).',
+  pmodel: 'The model that answered the last prompt, shown only when it differs from the session model (after a switch).',
   five: 'Five-hour usage limit: share used and time until it resets. Shown only when the engine reports it.',
   cache_ttl: 'Prompt cache: time left before it goes cold (🔥 hot over 60% of the TTL left, 💨 cooling to 30%, 💧 melting below that, 🧊 cold), its TTL, and when it goes cold. Click to switch TTL 5m/1h. Each finished turn refreshes it.',
   weekly: 'Weekly (7-day) usage limit: share used, cost this week, and time left until it resets. The cost counts only spend this bar has seen (since it was installed), not other machines.',
@@ -137,6 +137,11 @@ function summarize(counts: Record<string, [number, number]>) {
   const rows = [...merged.values()]
   rows.sort((a, b) => b.n - a.n)
   return { rows, calls: rows.reduce((a, r) => a + r.n, 0), errors: rows.reduce((a, r) => a + r.err, 0) }
+}
+
+// keeps only the fields whose ids are listed, in their order (a field node's key is "f-<id>")
+function keep<T>(nodes: T[], ids: string[]): T[] {
+  return nodes.filter(n => ids.includes(String((n as unknown as { key?: unknown } | null)?.key ?? '').replace(/^f-/, '')))
 }
 
 const SLOW_MS = 15000
@@ -407,11 +412,16 @@ export const register: Register = on => {
         </Box>
       </Box>
     )
+    // narrow windows drop fields in this order: totals and tools, then connection and last-prompt extras,
+    // then the hover tips. The cut-offs are estimates; the width is the body width from the render event.
+    const width = (e.props as { bodyColumns?: number }).bodyColumns ?? Infinity
+    // each right-aligned part goes when its estimated width would run into the left part
+    const [dropTotals, dropTools, dropWeekly, dropExtras, dropTips, dropResets] = [width < 215, width < 170, width < 110, width < 120, width < 80, width < 160]
     // the bottom row: the tip of the hovered field on the left, the switches on the right
     const bottom = (
       <Box height={1} justifyContent="space-between">
         <Box>
-          {Object.entries(TIPS).map(([id, doc]) => (
+          {!dropTips && Object.entries(TIPS).map(([id, doc]) => (
             <Box key={`t-${id}`} position="absolute" top={0} left={0} display="none" hover={{ scope: `tip-${id}`, display: 'flex' }}>
               <Text dimColor italic>{doc}</Text>
             </Box>
@@ -549,7 +559,7 @@ export const register: Register = on => {
         <Text color={f.weekly.percent >= 90 ? '#e06c75' : f.weekly.percent >= 70 ? '#e5c07b' : '#98c379'}>
           📅 week {f.weekly.percent}%
           {f.weekly.usd !== undefined && <Text color="#e5c07b"> · ${f.weekly.usd.toFixed(2)}</Text>}
-          {f.weekly.resetsAt !== undefined && (
+          {!dropResets && f.weekly.resetsAt !== undefined && (
             <Text dimColor> · resets in {span(f.weekly.resetsAt - now)} ({new Date(f.weekly.resetsAt).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' })})</Text>
           )}
         </Text>
@@ -562,7 +572,7 @@ export const register: Register = on => {
         'five',
         <Text color={f.fiveHour.percent >= 90 ? '#e06c75' : f.fiveHour.percent >= 70 ? '#e5c07b' : '#98c379'}>
           🕔 5h {f.fiveHour.percent}%
-          {f.fiveHour.resetsAt !== undefined && <Text dimColor> · resets in {span(f.fiveHour.resetsAt - now)}</Text>}
+          {!dropResets && f.fiveHour.resetsAt !== undefined && <Text dimColor> · resets in {span(f.fiveHour.resetsAt - now)}</Text>}
         </Text>,
       )
     const toolsNode =
@@ -624,15 +634,15 @@ export const register: Register = on => {
     )
     const turn =
       t &&
-      `⚡ ${duration(t.wallMs ?? t.engineMs ?? 0)}` +
+      `⚡${duration(t.wallMs ?? t.engineMs ?? 0)}` +
         (t.wallMs !== undefined && t.engineMs !== undefined ? ` [${duration(t.engineMs)}]` : '')
     const turnCost = t?.usd === undefined ? undefined : `$${t.usd.toFixed(2)}`
 
     const lastStats = [
           field('time', <Text dimColor>{promptAt === null ? '--:--:--' : new Date(promptAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</Text>),
-          t?.model && field('pmodel', <Text color="#5fd7d7">[{modelName(t.model)}]</Text>),
+          t?.model && t.model !== f.model && field('pmodel', <Text color="#5fd7d7">[{modelName(t.model)}]</Text>),
           field('turn', <Text color={t ? '#abb2bf' : undefined} dimColor={!t}>
-            {turn ?? '⚡ 0.0s'}
+            {turn ?? '⚡0.0s'}
             {turnCost !== undefined && <Text color="#e5c07b"> · {turnCost}</Text>}
           </Text>),
           why && field('why', <Text color="#e06c75">{why}</Text>),
@@ -659,7 +669,7 @@ export const register: Register = on => {
             field('dir', <Text>📁 {f.dir}</Text>),
             f.branch !== undefined && field('branch', <Text>🌿 {f.branch}</Text>),
           ),
-          <Box>
+          dropWeekly ? null : <Box>
             {fiveNode}
             {fiveNode && <Text dimColor> | </Text>}
             {weeklyNode}
@@ -672,10 +682,13 @@ export const register: Register = on => {
             field('session', <Text>⏱️ {Math.floor(elapsed / 60)}m {elapsed % 60}s</Text>),
             cacheNode && field('cache_ttl', cacheNode),
           ),
-          totalsNode,
+          dropTotals ? null : totalsNode,
         )}
-        {lineWith(started, title('net_title', '🌐', 'connection stats'), ...(started ? netStats : []))}
-        {split(lineWith(started, title('last_title', '⏱️', 'last prompt stats'), ...(started ? lastStats : [])), toolsNode)}
+        {lineWith(started, title('net_title', '🌐', 'connection stats'), ...(started ? (dropExtras ? keep(netStats, ['net_health', 'net_last']) : netStats) : []))}
+        {split(
+          lineWith(started, title('last_title', '⏱️', 'last prompt stats'), ...(started ? (dropExtras ? keep(lastStats, ['time', 'turn', 'why']) : lastStats) : [])),
+          dropTools ? null : toolsNode,
+        )}
         {bottom}
       </Box>
     )
