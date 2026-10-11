@@ -144,6 +144,30 @@ function keep<T>(nodes: T[], ids: string[]): T[] {
   return nodes.filter(n => ids.includes(String((n as unknown as { key?: unknown } | null)?.key ?? '').replace(/^f-/, '')))
 }
 
+// a character a terminal draws two columns wide: emoji (an emoji-presentation one, or any followed by
+// the emoji selector U+FE0F) and East Asian wide characters
+const WIDE = /\p{Emoji_Presentation}|\p{Extended_Pictographic}️|[ᄀ-ᅟ⺀-꓏가-힣豈-﫿︰-﹏＀-｠￠-￦]|[\u{20000}-\u{3FFFD}]/u
+const graphemes = new Intl.Segmenter()
+// the columns a node takes when drawn: a row's children side by side, a column's widest child;
+// hidden and absolutely placed boxes take none
+function cols(node: RenderChildren): number {
+  if (node === null || node === undefined || typeof node === 'boolean') return 0
+  if (typeof node === 'number') return String(node).length
+  if (typeof node === 'string') {
+    let n = 0
+    for (const { segment } of graphemes.segment(node)) n += WIDE.test(segment) ? 2 : 1
+    return n
+  }
+  if (Array.isArray(node)) return node.reduce((a: number, c: RenderChildren) => a + cols(c), 0)
+  const el = node as { type: string; props?: Record<string, unknown>; children?: RenderChildren[] }
+  const p = el.props ?? {}
+  if (p.display === 'none' || p.position === 'absolute') return 0
+  const widths = (el.children ?? []).map(cols).filter(w => w > 0)
+  if (el.type === 'Box' && p.flexDirection === 'column') return Math.max(0, ...widths)
+  const gap = el.type === 'Box' ? Number(p.columnGap ?? p.gap ?? 0) * Math.max(0, widths.length - 1) : 0
+  return widths.reduce((a, w) => a + w, 0) + gap
+}
+
 const SLOW_MS = 15000
 const VERY_SLOW_MS = 30000
 
@@ -412,16 +436,16 @@ export const register: Register = on => {
         </Box>
       </Box>
     )
-    // narrow windows drop fields in this order: totals and tools, then connection and last-prompt extras,
-    // then the hover tips. The cut-offs are estimates; the width is the body width from the render event.
+    // narrow windows drop what would not fit, measured against the body width from the render event:
+    // a right-aligned part goes when it would run into the left part (with a column between them),
+    // the connection and last-prompt extras when their line overflows, and a tip that would cover the switches
     const width = (e.props as { bodyColumns?: number }).bodyColumns ?? Infinity
-    // each right-aligned part goes when its estimated width would run into the left part
-    const [dropTotals, dropTools, dropWeekly, dropExtras, dropTips, dropResets] = [width < 215, width < 170, width < 110, width < 120, width < 80, width < 160]
+    const fits = (...parts: RenderChildren[]) => parts.reduce((a: number, p) => a + cols(p), 0) + parts.length - 1 <= width
     // the bottom row: the tip of the hovered field on the left, the switches on the right
     const bottom = (
       <Box height={1} justifyContent="space-between">
         <Box>
-          {!dropTips && Object.entries(TIPS).map(([id, doc]) => (
+          {Object.entries(TIPS).filter(([, doc]) => fits(doc, switches)).map(([id, doc]) => (
             <Box key={`t-${id}`} position="absolute" top={0} left={0} display="none" hover={{ scope: `tip-${id}`, display: 'flex' }}>
               <Text dimColor italic>{doc}</Text>
             </Box>
@@ -551,7 +575,7 @@ export const register: Register = on => {
     ]
     // Until the first prompt, only the label shows (no stats); afterwards just the icon and the stats.
     const title = (key: string, icon: string, label: string) => field(key, <Text dimColor>{started ? icon : `${icon} ${label}`}</Text>)
-    const weeklyNode = field(
+    const weeklyNode = (resets: boolean) => field(
       'weekly',
       f.weekly === undefined ? (
         <Text dimColor>📅 week – · no weekly limit data</Text>
@@ -559,20 +583,20 @@ export const register: Register = on => {
         <Text color={f.weekly.percent >= 90 ? '#e06c75' : f.weekly.percent >= 70 ? '#e5c07b' : '#98c379'}>
           📅 week {f.weekly.percent}%
           {f.weekly.usd !== undefined && <Text color="#e5c07b"> · ${f.weekly.usd.toFixed(2)}</Text>}
-          {!dropResets && f.weekly.resetsAt !== undefined && (
+          {resets && f.weekly.resetsAt !== undefined && (
             <Text dimColor> · resets in {span(f.weekly.resetsAt - now)} ({new Date(f.weekly.resetsAt).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' })})</Text>
           )}
         </Text>
       ),
     )
     // the five-hour window, shown before the weekly one; absent until the engine reports it
-    const fiveNode =
+    const fiveNode = (resets: boolean) =>
       f.fiveHour !== undefined &&
       field(
         'five',
         <Text color={f.fiveHour.percent >= 90 ? '#e06c75' : f.fiveHour.percent >= 70 ? '#e5c07b' : '#98c379'}>
           🕔 5h {f.fiveHour.percent}%
-          {!dropResets && f.fiveHour.resetsAt !== undefined && <Text dimColor> · resets in {span(f.fiveHour.resetsAt - now)}</Text>}
+          {resets && f.fiveHour.resetsAt !== undefined && <Text dimColor> · resets in {span(f.fiveHour.resetsAt - now)}</Text>}
         </Text>,
       )
     const toolsNode =
@@ -659,36 +683,47 @@ export const register: Register = on => {
           field('answer', <Text dimColor>💬 {short(t?.answerChars ?? 0)}</Text>),
     ]
 
+    // Each row takes the widest version of itself that fits the body width.
+    const top = line(
+      field('clock', <Text dimColor>🕰️ {new Date(now).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</Text>),
+      field('model', <Text color="#5fd7d7">[{modelName(f.model)}]</Text>),
+      field('dir', <Text>📁 {f.dir}</Text>),
+      f.branch !== undefined && field('branch', <Text>🌿 {f.branch}</Text>),
+    )
+    // the limits on the right of the top row: with their reset times, without them, or not at all
+    const limits = (resets: boolean) => {
+      const five = fiveNode(resets)
+      return (
+        <Box>
+          {five}
+          {five && <Text dimColor> | </Text>}
+          {weeklyNode(resets)}
+        </Box>
+      )
+    }
+    const topRight = [limits(true), limits(false)].find(r => fits(top, r)) ?? null
+    const ctxLine = line(
+      bar && field('ctx', bar),
+      field('cost', <Text color="#e5c07b">${(f.usd ?? 0).toFixed(2)}</Text>),
+      field('session', <Text>⏱️ {Math.floor(elapsed / 60)}m {elapsed % 60}s</Text>),
+      cacheNode && field('cache_ttl', cacheNode),
+    )
+    const ctxRight = fits(ctxLine, totalsNode) ? totalsNode : null
+    // the connection and last-prompt lines fall back to their main fields when the full line overflows
+    const netFull = lineWith(started, title('net_title', '🌐', 'connection stats'), ...(started ? netStats : []))
+    const netLine = fits(netFull) ? netFull : lineWith(started, title('net_title', '🌐', 'connection stats'), ...(started ? keep(netStats, ['net_health', 'net_last']) : []))
+    const lastFull = lineWith(started, title('last_title', '⏱️', 'last prompt stats'), ...(started ? lastStats : []))
+    const lastLine = fits(lastFull) ? lastFull : lineWith(started, title('last_title', '⏱️', 'last prompt stats'), ...(started ? keep(lastStats, ['time', 'turn', 'why']) : []))
+    // the tools chips go before the last-prompt extras do
+    const lastRight = fits(lastLine, toolsNode) ? toolsNode : null
+
     return (
       <Box flexDirection="column">
         {rule}
-        {split(
-          line(
-            field('clock', <Text dimColor>🕰️ {new Date(now).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</Text>),
-            field('model', <Text color="#5fd7d7">[{modelName(f.model)}]</Text>),
-            field('dir', <Text>📁 {f.dir}</Text>),
-            f.branch !== undefined && field('branch', <Text>🌿 {f.branch}</Text>),
-          ),
-          dropWeekly ? null : <Box>
-            {fiveNode}
-            {fiveNode && <Text dimColor> | </Text>}
-            {weeklyNode}
-          </Box>,
-        )}
-        {split(
-          line(
-            bar && field('ctx', bar),
-            field('cost', <Text color="#e5c07b">${(f.usd ?? 0).toFixed(2)}</Text>),
-            field('session', <Text>⏱️ {Math.floor(elapsed / 60)}m {elapsed % 60}s</Text>),
-            cacheNode && field('cache_ttl', cacheNode),
-          ),
-          dropTotals ? null : totalsNode,
-        )}
-        {lineWith(started, title('net_title', '🌐', 'connection stats'), ...(started ? (dropExtras ? keep(netStats, ['net_health', 'net_last']) : netStats) : []))}
-        {split(
-          lineWith(started, title('last_title', '⏱️', 'last prompt stats'), ...(started ? (dropExtras ? keep(lastStats, ['time', 'turn', 'why']) : lastStats) : [])),
-          dropTools ? null : toolsNode,
-        )}
+        {split(top, topRight)}
+        {split(ctxLine, ctxRight)}
+        {netLine}
+        {split(lastLine, lastRight)}
         {bottom}
       </Box>
     )
