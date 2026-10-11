@@ -101,6 +101,8 @@ const duration = (ms: number) =>
 
 const clock = (ms: number) => `${Math.floor(ms / 60000)}:${String(Math.floor((ms % 60000) / 1000)).padStart(2, '0')}`
 
+const tokens = (n: number) => (n >= 1e6 ? `${+(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n))
+
 const span = (ms: number) => {
   const m = Math.max(0, Math.floor(ms / 60000))
   const [d, h] = [Math.floor(m / 1440), Math.floor((m % 1440) / 60)]
@@ -418,6 +420,8 @@ export const register: Register = on => {
     )
 
     const ctx = Math.round(f.ctx ?? 0) // 0% until the first turn reports usage
+    const bd = await read($, breakdown)
+    const ctxSize = `${tokens(bd?.total ?? 0)}/${bd?.max ? tokens(bd.max) : '–'}`
     const filled = Math.round((Math.min(ctx, 100) / 100) * CELLS)
     const cells = Array.from({ length: CELLS }, (_, i) => i)
     const elapsed = Math.max(0, Math.round((now - f.startedAt) / 1000))
@@ -548,6 +552,7 @@ export const register: Register = on => {
         ))}
         <Text color={filled === CELLS ? gradient(1) : TRACK}>●</Text>
         <Text color={gradient(ctx / 100)} bold> {ctx}%</Text>
+        <Text dimColor> · {ctxSize}</Text>
       </Button>
     )
     const turn =
