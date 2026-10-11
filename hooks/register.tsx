@@ -485,7 +485,7 @@ export const register: Register = on => {
       n.errors > 0 && field('net_failed', <Text color="#e06c75">{n.errors} failed</Text>),
       recentErr && field('net_err', <Text color="#e06c75">{Math.round((now - n.lastErrorAt!) / 60000)}m ago: {n.lastError}</Text>),
     ]
-    // Until the first prompt, only the label shows; afterwards just the icon and the stats.
+    // Until the first prompt, only the label shows (no stats); afterwards just the icon and the stats.
     const title = (key: string, icon: string, label: string) => field(key, <Text dimColor>{started ? icon : `${icon} ${label}`}</Text>)
     const weeklyNode = field(
       'weekly',
@@ -586,8 +586,8 @@ export const register: Register = on => {
           ),
           totalsNode,
         )}
-        {lineWith(started, title('net_title', '🌐', 'connection stats'), ...netStats)}
-        {split(lineWith(started, title('last_title', '⏱️', 'last prompt stats'), ...lastStats), toolsNode)}
+        {lineWith(started, title('net_title', '🌐', 'connection stats'), ...(started ? netStats : []))}
+        {split(lineWith(started, title('last_title', '⏱️', 'last prompt stats'), ...(started ? lastStats : [])), toolsNode)}
         {bottom}
       </Box>
     )
