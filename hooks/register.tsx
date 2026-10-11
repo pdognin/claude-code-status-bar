@@ -37,7 +37,7 @@ const TIPS: Record<string, string> = {
   cache_ttl: 'Prompt cache: time left before it goes cold (🔥 hot over 60% of the TTL left, 💨 cooling to 30%, 💧 melting below that, 🧊 cold), its TTL, and when it goes cold. Click to switch TTL 5m/1h. Each finished turn refreshes it.',
   weekly: 'Weekly (7-day) usage limit: share used, cost this week, and time left until it resets. The cost counts only spend this bar has seen (since it was installed), not other machines.',
   tools: 'Tool calls for this prompt, by tool (× count, red = failed or denied), and ✓ succeeded / ✗ failed.',
-  totals: 'Whole session: prompts, tool calls with success rate, average cost per prompt, and the most used tools.',
+  totals: 'Whole session: prompts, tool calls with success rate, average cost and time per prompt, the most used tools, compactions, and interrupted prompts.',
   net_last: 'Model API: the live wait on the current request (waiting for the first token, then streaming), or how long the last request took. 🐌 and yellow past 15s, red past 30s.',
   net_ttft: 'Time to first token of the last request: how long the provider took to start answering.',
   net_avg: 'Average duration of the last 10 model requests.',
@@ -49,6 +49,9 @@ const TIPS: Record<string, string> = {
   sw_bar: 'Show or hide this whole status bar (remembered across sessions). The buttons stay so you can bring it back.',
   sw_line: 'Show or hide the classic status line from ~/.claude/statusline.sh (remembered across sessions).',
   answer: 'Length of the last answer, in characters (k = thousands).',
+  net_health: 'Connection state: ● ok, ◐ slow (a request past 15s with no first token yet, or the last request was slow), ✕ stalled (no first token after 30s), ✕ errors (an error in the last 10 minutes), ○ idle before any request.',
+  speed: 'Output speed of the last prompt: output tokens per second while the model was streaming. Tool time is not counted.',
+  grow: 'How much the context grew during the last prompt. ⟲ compacted means the context shrank, so it was compacted.',
 }
 
 let activePalette = 0
@@ -76,6 +79,11 @@ const net = atom({ plugin: 'status-bar', key: 'net' } as const, { reqs: 0, error
 const barOn = atom({ plugin: 'status-bar', key: 'barOn' } as const, true)
 const lineOn = atom({ plugin: 'status-bar', key: 'lineOn' } as const, true)
 const lastTurn = atom({ plugin: 'status-bar', key: 'lastTurn' } as const, null)
+const ctxAtPrompt = atom({ plugin: 'status-bar', key: 'ctxAtPrompt' } as const, null)
+const turnStream = atom({ plugin: 'status-bar', key: 'turnStream' } as const, 0)
+const turns = atom({ plugin: 'status-bar', key: 'turns' } as const, { n: 0, wallMs: 0, usd: 0 })
+const compactions = atom({ plugin: 'status-bar', key: 'compactions' } as const, 0)
+const interrupts = atom({ plugin: 'status-bar', key: 'interrupts' } as const, 0)
 
 function gradient(t: number): string {
   const stops = (PALETTES[activePalette % PALETTES.length] ?? PALETTES[0]!).stops
@@ -225,6 +233,9 @@ export const register: Register = on => {
       await update($, prompts, n => n + 1)
       await update($, lastPrompt, () => at)
       await update($, costAtPrompt, () => cost?.usd ?? null)
+      const ctxNow = (await read($, breakdown))?.total ?? null
+      await update($, ctxAtPrompt, () => ctxNow)
+      await update($, turnStream, () => 0)
     }
     return next(e)
   })
@@ -286,6 +297,10 @@ export const register: Register = on => {
     } finally {
       const end = await $.clock.now()
       openRequests.delete(id)
+      if (!isAborted && open.firstAt !== undefined) {
+        const streamed = end - open.firstAt
+        await update($, turnStream, ms => ms + streamed)
+      }
       await update($, net, n => {
         const ms = end - startedAt
         // an interrupted request says nothing about the provider's speed
@@ -309,6 +324,14 @@ export const register: Register = on => {
 
     const [submittedAt, usdBefore, done] = [await read($, lastPrompt), await read($, costAtPrompt), await $.clock.now()]
     const startUsd = usdBefore ?? previous
+    const ctxBefore = await read($, ctxAtPrompt)
+    const ctxNow = (await read($, breakdown))?.total
+    const compacted = ctxBefore !== null && ctxNow !== undefined && ctxNow < ctxBefore * 0.8
+    const turnUsd = usd === undefined || startUsd === undefined ? undefined : Math.max(0, usd - startUsd)
+    const wallMs = submittedAt === null ? e.durationMs : done - submittedAt
+    if (compacted) await update($, compactions, c => c + 1)
+    if (e.reason === 'aborted') await update($, interrupts, c => c + 1)
+    await update($, turns, t0 => ({ n: t0.n + 1, wallMs: t0.wallMs + wallMs, usd: t0.usd + (turnUsd ?? 0) }))
     if (e.reason === 'error') {
       // an API error that ended the turn after retries; the step may not have thrown
       const n = await read($, net)
@@ -318,15 +341,19 @@ export const register: Register = on => {
     }
     const u = e.usage
     if (u) await update($, cacheAt, () => done) // any request touching the cache renews its TTL
+    const streamMs = await read($, turnStream)
     await update($, lastTurn, () => ({
       reason: e.reason,
-      wallMs: submittedAt === null ? e.durationMs : done - submittedAt,
+      wallMs,
       engineMs: e.durationMs,
-      usd: usd === undefined || startUsd === undefined ? undefined : Math.max(0, usd - startUsd),
+      usd: turnUsd,
       input: u && u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens,
       output: u?.output_tokens,
       cacheRead: u?.cache_read_input_tokens,
       answerChars: e.answer.length,
+      streamMs,
+      ctxDelta: ctxBefore === null || ctxNow === undefined ? undefined : ctxNow - ctxBefore,
+      compacted,
     }))
     return next(e)
   })
@@ -456,6 +483,7 @@ export const register: Register = on => {
       </Button>
     )
     const [pt, st, nPrompts] = [summarize((await read($, promptTools)).counts), summarize(await read($, sessionTools)), await read($, prompts)]
+    const [tu, comp, intr] = [await read($, turns), await read($, compactions), await read($, interrupts)]
     const chips = (rows: ReturnType<typeof summarize>['rows'], max: number) =>
       rows.slice(0, max).flatMap(r => [
         <Text key={r.name} color={r.err > 0 ? '#e06c75' : undefined}>{r.name}×{r.n}</Text>,
@@ -470,7 +498,16 @@ export const register: Register = on => {
     const recentErr = n.lastErrorAt !== undefined && now - n.lastErrorAt < 10 * 60000
     const netColor = waiting !== undefined ? (waiting > VERY_SLOW_MS ? '#e06c75' : waiting > SLOW_MS ? '#e5c07b' : '#61afef') : recentErr ? '#e06c75' : '#98c379'
     const started = nPrompts > 0 || n.reqs > 0 || n.inflight !== undefined || t != null
+    const stalled = n.inflight !== undefined && n.firstAt === undefined && (waiting ?? 0) > VERY_SLOW_MS
+    const slowNow = n.inflight !== undefined && n.firstAt === undefined && (waiting ?? 0) > SLOW_MS
+    const health =
+      stalled ? { text: '✕ stalled', color: '#e06c75' }
+      : slowNow || (n.lastMs ?? 0) > SLOW_MS ? { text: '◐ slow', color: '#e5c07b' }
+      : recentErr ? { text: '✕ errors', color: '#e06c75' }
+      : n.reqs > 0 ? { text: '● ok', color: '#98c379' }
+      : { text: '○ idle', color: undefined }
     const netStats = [
+      field('net_health', <Text color={health.color} dimColor={!health.color}>{health.text}</Text>),
       field(
         'net_last',
         waiting !== undefined ? (
@@ -527,6 +564,9 @@ export const register: Register = on => {
           Σ {nPrompts} prompt{nPrompts === 1 ? '' : 's'} · {st.calls} tool calls
           {okPct !== undefined && ` (${okPct}% ok)`}
           {f.usd !== undefined && nPrompts > 0 && ` · avg $${(f.usd / nPrompts).toFixed(2)}/prompt`}
+          {tu.n > 0 && ` · avg ${duration(tu.wallMs / tu.n)}/prompt`}
+          {comp > 0 && ` · ⟲ ${comp} compaction${comp === 1 ? '' : 's'}`}
+          {intr > 0 && ` · ✋ ${intr} interrupted`}
           {st.rows.length > 0 && ` · top: ${st.rows.slice(0, 3).map(r => `${r.name}×${r.n}`).join(' ')}`}
         </Text>,
       )
@@ -552,6 +592,7 @@ export const register: Register = on => {
           </Text>
         ))}
         <Text color={gradient(1)}>●</Text>
+        {ctx >= 80 && <Text color="#e06c75" bold>⚠ </Text>}
         <Text color={gradient(ctx / 100)} bold> {ctx}%</Text>
         <Text dimColor> · </Text>
         <Text color={gradient(ctx / 100)}>{ctxUsed}</Text>
@@ -570,6 +611,8 @@ export const register: Register = on => {
           field('turn', <Text color={t ? '#abb2bf' : undefined} dimColor={!t}>{turn ?? '⚡ 0.0s · $0.00'}</Text>),
           why && field('why', <Text color="#e06c75">{why}</Text>),
           field('tokens', <Text dimColor>↑{short(t?.input ?? 0)} ↓{short(t?.output ?? 0)}</Text>),
+          t?.output && t.streamMs ? field('speed', <Text dimColor>{Math.round(t.output / (t.streamMs / 1000))} tok/s</Text>) : null,
+          t?.ctxDelta !== undefined && field('grow', t.compacted ? <Text color="#e5c07b">⟲ compacted</Text> : <Text dimColor>{t.ctxDelta < 0 ? '−' : '+'}{short(Math.abs(t.ctxDelta))} ctx</Text>),
           field('cache', <Text dimColor>cache {cachePct ?? 0}%</Text>),
           field('answer', <Text dimColor>💬 {short(t?.answerChars ?? 0)}</Text>),
     ]
