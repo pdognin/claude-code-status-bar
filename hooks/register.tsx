@@ -405,11 +405,15 @@ export const register: Register = on => {
       </Box>
     )
     // A line of fields, the absent ones skipped and the rest set apart by bars.
-    const line = (...fields: RenderChildren[]) => (
+    const line = (...fields: RenderChildren[]) => lineWith(false, ...fields)
+    // Same, but the first field (an icon) sits next to the second with a plain space.
+    const lineWith = (tight: boolean, ...fields: RenderChildren[]) => (
       <Box>
         {fields
           .filter(Boolean)
-          .flatMap((node, i) => (i === 0 ? [node] : [<Text key={`s${i}`} dimColor> | </Text>, node]))}
+          .flatMap((node, i) =>
+            i === 0 ? [node] : [<Text key={`s${i}`} dimColor>{tight && i === 1 ? ' ' : ' | '}</Text>, node],
+          )}
       </Box>
     )
 
@@ -582,8 +586,8 @@ export const register: Register = on => {
           ),
           totalsNode,
         )}
-        {line(title('net_title', '🌐', 'connection stats'), ...netStats)}
-        {split(line(title('last_title', '⏱️', 'last prompt stats'), ...lastStats), toolsNode)}
+        {lineWith(started, title('net_title', '🌐', 'connection stats'), ...netStats)}
+        {split(lineWith(started, title('last_title', '⏱️', 'last prompt stats'), ...lastStats), toolsNode)}
         {bottom}
       </Box>
     )
