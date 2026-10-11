@@ -56,6 +56,6 @@ export type Breakdown = {
 
 declare module 'claude-code' {
   interface PluginState {
-    'status-bar': { figures: Figures | null; lastPrompt: number | null; costAtPrompt: number | null; lastTurn: LastTurn | null; breakdown: Breakdown | null; palette: number; cacheAt: number | null; cacheTtl: number; tick: number; promptTools: { seq: number; counts: ToolCounts }; sessionTools: ToolCounts; prompts: number; net: NetStats; barOn: boolean; lineOn: boolean; ctxAtPrompt: number | null; turnStream: number; turns: { n: number; wallMs: number; usd: number }; compactions: number; interrupts: number }
+    'status-bar': { figures: Figures | null; lastPrompt: number | null; costAtPrompt: number | null; lastTurn: LastTurn | null; breakdown: Breakdown | null; palette: number; cacheAt: number | null; cacheTtl: number; tick: number; promptTools: { seq: number; counts: ToolCounts }; sessionTools: ToolCounts; prompts: number; net: NetStats; barOn: boolean; lineOn: boolean; ctxAtPrompt: number | null; turnStream: number; turns: { n: number; wallMs: number; usd: number }; compactions: number; interrupts: number; running: boolean }
   }
 }

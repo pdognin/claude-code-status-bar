@@ -30,7 +30,7 @@ const TIPS: Record<string, string> = {
   ctx: 'Context window used. Click to change the color palette.',
   cost: 'Total session cost so far.',
   session: 'Time since this session started.',
-  turn: 'Last prompt: wall time from submit to finish, [engine-measured turn time], and cost.',
+  turn: 'Last prompt: wall time from submit to finish, [engine-measured turn time], and cost. While a prompt runs, its wall time counts up and the other stats wait for it to finish.',
   why: 'Why the last turn ended: interrupted, refused by the model, or an API error.',
   tokens: 'Tokens for the last turn: input (cache hits included) and output.',
   cache: "Share of the last turn's input served from the prompt cache. wrote = tokens newly written to the cache (a miss, which costs more than a hit).",
@@ -86,6 +86,8 @@ const turnStream = atom({ plugin: 'status-bar', key: 'turnStream' } as const, 0)
 const turns = atom({ plugin: 'status-bar', key: 'turns' } as const, { n: 0, wallMs: 0, usd: 0 })
 const compactions = atom({ plugin: 'status-bar', key: 'compactions' } as const, 0)
 const interrupts = atom({ plugin: 'status-bar', key: 'interrupts' } as const, 0)
+// a prompt is running: from its submit to the end of its turn
+const running = atom({ plugin: 'status-bar', key: 'running' } as const, false)
 
 function gradient(t: number): string {
   const stops = (PALETTES[activePalette % PALETTES.length] ?? PALETTES[0]!).stops
@@ -270,6 +272,7 @@ export const register: Register = on => {
       promptSeq += 1
       await update($, prompts, n => n + 1)
       await update($, lastPrompt, () => at)
+      await update($, running, () => true)
       await update($, costAtPrompt, () => cost?.usd ?? null)
       const ctxNow = (await read($, breakdown))?.total ?? null
       await update($, ctxAtPrompt, () => ctxNow)
@@ -396,6 +399,7 @@ export const register: Register = on => {
       ctxDelta: ctxBefore === null || ctxNow === undefined ? undefined : ctxNow - ctxBefore,
       compacted,
     }))
+    await update($, running, () => false)
     return next(e)
   })
 
@@ -471,7 +475,7 @@ export const register: Register = on => {
     }
     activePalette = await read($, palette)
     await read($, tick) // redraw every second for the countdown
-    const [t, promptAt, now] = [await read($, lastTurn), await read($, lastPrompt), await $.clock.now()]
+    const [t, promptAt, now, isRunning] = [await read($, lastTurn), await read($, lastPrompt), await $.clock.now(), await read($, running)]
 
     // A hoverable field: hovering it lights the tip with the same id.
     const field = (id: string, node: RenderChildren) => (
@@ -528,7 +532,9 @@ export const register: Register = on => {
         )}
       </Button>
     )
-    const [pt, st, nPrompts] = [summarize((await read($, promptTools)).counts), summarize(await read($, sessionTools)), await read($, prompts)]
+    // the tool counts belong to the current prompt only once its first tool call has landed
+    const ptNow = await read($, promptTools)
+    const [pt, st, nPrompts] = [summarize(ptNow.seq === promptSeq ? ptNow.counts : {}), summarize(await read($, sessionTools)), await read($, prompts)]
     const [tu, comp, intr] = [await read($, turns), await read($, compactions), await read($, interrupts)]
     const chips = (rows: ReturnType<typeof summarize>['rows'], max: number) =>
       rows.slice(0, max).flatMap(r => [
@@ -662,8 +668,13 @@ export const register: Register = on => {
         (t.wallMs !== undefined && t.engineMs !== undefined ? ` [${duration(t.engineMs)}]` : '')
     const turnCost = t?.usd === undefined ? undefined : `$${t.usd.toFixed(2)}`
 
-    const lastStats = [
-          field('time', <Text dimColor>{promptAt === null ? '--:--:--' : new Date(promptAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</Text>),
+    const timeField = field('time', <Text dimColor>{promptAt === null ? '--:--:--' : new Date(promptAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</Text>)
+    // while a prompt runs, the previous prompt's stats are hidden and the wall time counts up
+    const lastStats = isRunning ? [
+          timeField,
+          field('turn', <Text color="#61afef">⚡ {clock(Math.max(0, now - (promptAt ?? now)))} running</Text>),
+    ] : [
+          timeField,
           t?.model && t.model !== f.model && field('pmodel', <Text color="#5fd7d7">[{modelName(t.model)}]</Text>),
           field('turn', <Text color={t ? '#abb2bf' : undefined} dimColor={!t}>
             {turn ?? '⚡0.0s'}
