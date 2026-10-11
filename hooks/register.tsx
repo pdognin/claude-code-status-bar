@@ -603,12 +603,15 @@ export const register: Register = on => {
     const turn =
       t &&
       `⚡ ${duration(t.wallMs ?? t.engineMs ?? 0)}` +
-        (t.wallMs !== undefined && t.engineMs !== undefined ? ` [${duration(t.engineMs)}]` : '') +
-        (t.usd === undefined ? '' : ` · $${t.usd.toFixed(2)}`)
+        (t.wallMs !== undefined && t.engineMs !== undefined ? ` [${duration(t.engineMs)}]` : '')
+    const turnCost = t?.usd === undefined ? undefined : `$${t.usd.toFixed(2)}`
 
     const lastStats = [
           field('time', <Text dimColor>{promptAt === null ? '--:--:--' : new Date(promptAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</Text>),
-          field('turn', <Text color={t ? '#abb2bf' : undefined} dimColor={!t}>{turn ?? '⚡ 0.0s · $0.00'}</Text>),
+          field('turn', <Text color={t ? '#abb2bf' : undefined} dimColor={!t}>
+            {turn ?? '⚡ 0.0s'}
+            {turnCost !== undefined && <Text color="#e5c07b"> · {turnCost}</Text>}
+          </Text>),
           why && field('why', <Text color="#e06c75">{why}</Text>),
           field('tokens', <Text dimColor>↑{short(t?.input ?? 0)} ↓{short(t?.output ?? 0)}</Text>),
           t?.output && t.streamMs ? field('speed', <Text dimColor>{Math.round(t.output / (t.streamMs / 1000))} tok/s</Text>) : null,
