@@ -33,7 +33,9 @@ const TIPS: Record<string, string> = {
   turn: 'Last prompt: wall time from submit to finish, [engine-measured turn time], and cost.',
   why: 'Why the last turn ended: interrupted, refused by the model, or an API error.',
   tokens: 'Tokens for the last turn: input (cache hits included) and output.',
-  cache: "Share of the last turn's input served from the prompt cache.",
+  cache: "Share of the last turn's input served from the prompt cache. wrote = tokens newly written to the cache (a miss, which costs more than a hit).",
+  pmodel: 'The model that answered the last prompt (it can differ from the session model after a switch).',
+  five: 'Five-hour usage limit: share used and time until it resets. Shown only when the engine reports it.',
   cache_ttl: 'Prompt cache: time left before it goes cold (🔥 hot over 60% of the TTL left, 💨 cooling to 30%, 💧 melting below that, 🧊 cold), its TTL, and when it goes cold. Click to switch TTL 5m/1h. Each finished turn refreshes it.',
   weekly: 'Weekly (7-day) usage limit: share used, cost this week, and time left until it resets. The cost counts only spend this bar has seen (since it was installed), not other machines.',
   tools: 'Tool calls for this prompt, by tool (× count, red = failed or denied), and ✓ succeeded / ✗ failed.',
@@ -49,7 +51,7 @@ const TIPS: Record<string, string> = {
   sw_bar: 'Show or hide this whole status bar (remembered across sessions). The buttons stay so you can bring it back.',
   sw_line: 'Show or hide the classic status line from ~/.claude/statusline.sh (remembered across sessions).',
   answer: 'Length of the last answer, in characters (k = thousands).',
-  net_health: 'Connection state: ● ok, ◐ slow (a request past 15s with no first token yet, or the last request was slow), ✕ stalled (no first token after 30s), ✕ errors (an error in the last 10 minutes), ○ idle before any request.',
+  net_health: 'Connection state: ● ok, ◐ slow (a request past 15s with no first token yet, or the last request was slow), ✕ stalled with how long it has waited (no first token after 30s), ✕ errors (an error in the last 10 minutes), ○ idle before any request.',
   speed: 'Output speed of the last prompt: output tokens per second while the model was streaming. Tool time is not counted.',
   grow: 'How much the context grew during the last prompt. ⟲ compacted means the context shrank, so it was compacted.',
 }
@@ -104,12 +106,17 @@ function modelName(id: string): string {
   return `${family.charAt(0).toUpperCase()}${family.slice(1)} ${m[2]}${m[3] ? `.${m[3]}` : ''}`
 }
 
-const duration = (ms: number) =>
-  ms < 60000 ? `${(ms / 1000).toFixed(1)}s` : `${Math.floor(ms / 60000)}m ${Math.round((ms % 60000) / 1000)}s`
+// rounds to whole seconds first, so 119.6s reads 2m 0s rather than 1m 60s
+const duration = (ms: number) => {
+  if (ms < 60000) return `${(ms / 1000).toFixed(1)}s`
+  const secs = Math.round(ms / 1000)
+  return `${Math.floor(secs / 60)}m ${secs % 60}s`
+}
 
 const clock = (ms: number) => `${Math.floor(ms / 60000)}:${String(Math.floor((ms % 60000) / 1000)).padStart(2, '0')}`
 
-const tokens = (n: number) => (n >= 1e6 ? `${+(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n))
+// the k/M cutoff is checked on the rounded thousands, so 999,600 reads 1M rather than 1000k
+const tokens = (n: number) => (Math.round(n / 1e3) >= 1e3 ? `${+(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n))
 
 const span = (ms: number) => {
   const m = Math.max(0, Math.floor(ms / 60000))
@@ -164,6 +171,8 @@ async function refreshFigures($: EngineInterface) {
   const branch = git?.exitCode === 0 ? git.stdout.trim() || undefined : undefined
   const week = rateLimits.find(r => r.kind === 'seven_day')
   let weekly = week && { percent: week.percentUsed, resetsAt: week.resetsAt && Number.isFinite(Date.parse(week.resetsAt)) ? Date.parse(week.resetsAt) : undefined }
+  const five = rateLimits.find(r => r.kind === 'five_hour')
+  const fiveHour = five && { percent: five.percentUsed, resetsAt: five.resetsAt && Number.isFinite(Date.parse(five.resetsAt)) ? Date.parse(five.resetsAt) : undefined }
   // The engine has no weekly cost, so add each session's new spend to a total kept
   // in the store, started afresh when the weekly limit resets.
   let weekUsd = Number(await $.store.get('weekUsd')) || 0
@@ -184,7 +193,7 @@ async function refreshFigures($: EngineInterface) {
   } else {
     weekly = await savedWeekly($)
   }
-  await update($, figures, () => ({ weekly: weekly && { ...weekly, usd: weekUsd }, ctx: context.percent, usd: cost?.usd, model, dir, branch, startedAt }))
+  await update($, figures, () => ({ weekly: weekly && { ...weekly, usd: weekUsd }, fiveHour, ctx: context.percent, usd: cost?.usd, model, dir, branch, startedAt }))
   return cost?.usd
 }
 
@@ -342,6 +351,7 @@ export const register: Register = on => {
     const u = e.usage
     if (u) await update($, cacheAt, () => done) // any request touching the cache renews its TTL
     const streamMs = await read($, turnStream)
+    const model = await $.session.model().catch(() => undefined)
     await update($, lastTurn, () => ({
       reason: e.reason,
       wallMs,
@@ -350,6 +360,8 @@ export const register: Register = on => {
       input: u && u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens,
       output: u?.output_tokens,
       cacheRead: u?.cache_read_input_tokens,
+      cacheWrite: u?.cache_creation_input_tokens,
+      model,
       answerChars: e.answer.length,
       streamMs,
       ctxDelta: ctxBefore === null || ctxNow === undefined ? undefined : ctxNow - ctxBefore,
@@ -501,7 +513,7 @@ export const register: Register = on => {
     const stalled = n.inflight !== undefined && n.firstAt === undefined && (waiting ?? 0) > VERY_SLOW_MS
     const slowNow = n.inflight !== undefined && n.firstAt === undefined && (waiting ?? 0) > SLOW_MS
     const health =
-      stalled ? { text: '✕ stalled', color: '#e06c75' }
+      stalled ? { text: `✕ stalled ${duration(waiting ?? 0)}`, color: '#e06c75' }
       : slowNow || (n.lastMs ?? 0) > SLOW_MS ? { text: '◐ slow', color: '#e5c07b' }
       : recentErr ? { text: '✕ errors', color: '#e06c75' }
       : n.reqs > 0 ? { text: '● ok', color: '#98c379' }
@@ -543,6 +555,16 @@ export const register: Register = on => {
         </Text>
       ),
     )
+    // the five-hour window, shown before the weekly one; absent until the engine reports it
+    const fiveNode =
+      f.fiveHour !== undefined &&
+      field(
+        'five',
+        <Text color={f.fiveHour.percent >= 90 ? '#e06c75' : f.fiveHour.percent >= 70 ? '#e5c07b' : '#98c379'}>
+          🕔 5h {f.fiveHour.percent}%
+          {f.fiveHour.resetsAt !== undefined && <Text dimColor> · resets in {span(f.fiveHour.resetsAt - now)}</Text>}
+        </Text>,
+      )
     const toolsNode =
       field(
         'tools',
@@ -608,6 +630,7 @@ export const register: Register = on => {
 
     const lastStats = [
           field('time', <Text dimColor>{promptAt === null ? '--:--:--' : new Date(promptAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</Text>),
+          t?.model && field('pmodel', <Text color="#5fd7d7">[{modelName(t.model)}]</Text>),
           field('turn', <Text color={t ? '#abb2bf' : undefined} dimColor={!t}>
             {turn ?? '⚡ 0.0s'}
             {turnCost !== undefined && <Text color="#e5c07b"> · {turnCost}</Text>}
@@ -616,7 +639,13 @@ export const register: Register = on => {
           field('tokens', <Text dimColor>↑{short(t?.input ?? 0)} ↓{short(t?.output ?? 0)}</Text>),
           t?.output && t.streamMs ? field('speed', <Text dimColor>{Math.round(t.output / (t.streamMs / 1000))} tok/s</Text>) : null,
           t?.ctxDelta !== undefined && field('grow', t.compacted ? <Text color="#e5c07b">⟲ compacted</Text> : <Text dimColor>{t.ctxDelta < 0 ? '−' : '+'}{short(Math.abs(t.ctxDelta))} ctx</Text>),
-          field('cache', <Text dimColor>cache {cachePct ?? 0}%</Text>),
+          field(
+            'cache',
+            <Text dimColor>
+              cache {cachePct ?? 0}%
+              {t?.cacheWrite ? ` · wrote ${short(t.cacheWrite)}` : ''}
+            </Text>,
+          ),
           field('answer', <Text dimColor>💬 {short(t?.answerChars ?? 0)}</Text>),
     ]
 
@@ -630,7 +659,11 @@ export const register: Register = on => {
             field('dir', <Text>📁 {f.dir}</Text>),
             f.branch !== undefined && field('branch', <Text>🌿 {f.branch}</Text>),
           ),
-          weeklyNode,
+          <Box>
+            {fiveNode}
+            {fiveNode && <Text dimColor> | </Text>}
+            {weeklyNode}
+          </Box>,
         )}
         {split(
           line(

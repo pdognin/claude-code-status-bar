@@ -6,6 +6,7 @@ export type Figures = {
   branch?: string
   startedAt: number
   weekly?: { percent: number; resetsAt?: number; usd?: number }
+  fiveHour?: { percent: number; resetsAt?: number }
 }
 
 export type LastTurn = {
@@ -16,6 +17,10 @@ export type LastTurn = {
   input?: number
   output?: number
   cacheRead?: number
+  /** input tokens written to the prompt cache during the turn (a miss) */
+  cacheWrite?: number
+  /** the model that answered the turn */
+  model?: string
   answerChars: number
   /** ms the model spent streaming, summed over the turn's requests */
   streamMs?: number
