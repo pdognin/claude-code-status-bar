@@ -36,7 +36,7 @@ const TIPS: Record<string, string> = {
   cache: "Share of the last turn's input served from the prompt cache. wrote = tokens newly written to the cache (a miss, which costs more than a hit).",
   pmodel: 'The model that answered the last prompt, shown only when it differs from the session model (after a switch).',
   five: 'Five-hour usage limit: share used and time until it resets. Shown only when the engine reports it.',
-  cache_ttl: 'Prompt cache: time left before it goes cold (🔥 hot over 60% of the TTL left, 💨 cooling to 30%, 💧 melting below that, 🧊 cold), its TTL, and when it goes cold. Click to switch TTL 5m/1h. Each finished turn refreshes it.',
+  cache_ttl: 'Prompt cache: time left before it goes cold (🔥 hot over 60% of the TTL left, 💨 cooling to 30%, 💧 melting below that, 🧊 cold), its TTL, and when it goes cold. Click to switch TTL 5m/1h. Every model request renews it, so while a prompt runs it shows 🔥 in use; new = the last prompt found it cold and wrote a fresh one.',
   weekly: 'Weekly (7-day) usage limit: share used, cost this week, and time left until it resets. The cost counts only spend this bar has seen (since it was installed), not other machines.',
   tools: 'Tool calls for this prompt, by tool (× count, red = failed or denied), and ✓ succeeded / ✗ failed.',
   totals: 'Whole session: prompts, tool calls with success rate, average cost and time per prompt, the most used tools, compactions, and interrupted prompts.',
@@ -88,6 +88,8 @@ const compactions = atom({ plugin: 'status-bar', key: 'compactions' } as const, 
 const interrupts = atom({ plugin: 'status-bar', key: 'interrupts' } as const, 0)
 // a prompt is running: from its submit to the end of its turn
 const running = atom({ plugin: 'status-bar', key: 'running' } as const, false)
+// the running or last prompt found no warm cache, so its first request wrote a new one
+const cacheNew = atom({ plugin: 'status-bar', key: 'cacheNew' } as const, false)
 
 function gradient(t: number): string {
   const stops = (PALETTES[activePalette % PALETTES.length] ?? PALETTES[0]!).stops
@@ -273,6 +275,8 @@ export const register: Register = on => {
       await update($, prompts, n => n + 1)
       await update($, lastPrompt, () => at)
       await update($, running, () => true)
+      const [warmAt, ttl] = [await read($, cacheAt), await read($, cacheTtl)]
+      await update($, cacheNew, () => warmAt === null || at - warmAt > ttl)
       await update($, costAtPrompt, () => cost?.usd ?? null)
       const ctxNow = (await read($, breakdown))?.total ?? null
       await update($, ctxAtPrompt, () => ctxNow)
@@ -306,6 +310,9 @@ export const register: Register = on => {
     const startedAt = await $.clock.now()
     const open: { startedAt: number; firstAt?: number } = { startedAt }
     openRequests.set(id, open)
+    // the request reads the prompt cache as it starts, which renews its TTL; a subagent's
+    // requests have their own prompt, so they leave the main conversation's cache alone
+    if (e.agentId === undefined) await update($, cacheAt, () => startedAt)
     const show = (n: NetStats): NetStats => {
       const oldest = [...openRequests.values()].sort((x, y) => x.startedAt - y.startedAt)[0]
       return { ...n, inflight: oldest?.startedAt, firstAt: oldest?.firstAt }
@@ -381,7 +388,6 @@ export const register: Register = on => {
       }
     }
     const u = e.usage
-    if (u) await update($, cacheAt, () => done) // any request touching the cache renews its TTL
     const streamMs = await read($, turnStream)
     const model = await $.session.model().catch(() => undefined)
     await update($, lastTurn, () => ({
@@ -513,17 +519,24 @@ export const register: Register = on => {
       share > 0.6 ? { icon: '🔥', color: '#98c379' }
       : share > 0.3 ? { icon: '💨', color: '#e5c07b' }
       : { icon: '💧', color: '#e06c75' }
+    // "new" marks a cache the last prompt wrote afresh, having found none warm
+    const isNew = (await read($, cacheNew)) ? 'new · ' : ''
     const cacheNode = (
       <Button key="ttl" plain onPress={async () => {
         const chosen = ttl === TTLS[0] ? TTLS[1]! : TTLS[0]!
         await $.store.set('cacheTtl', chosen)
         await update($, cacheTtl, () => chosen)
       }}>
-        {left === undefined ? (
+        {isRunning ? (
+          // each request of a running prompt renews the cache, so there is no countdown until it ends
+          <Text color="#98c379">
+            🔥 in use <Text dimColor>{isNew}ttl {ttlLabel}</Text>
+          </Text>
+        ) : left === undefined ? (
           <Text dimColor>🧊 no cache yet · ttl {ttlLabel}</Text>
         ) : left > 0 ? (
           <Text color={stage.color}>
-            {stage.icon} {clock(left)} <Text dimColor>ttl {ttlLabel} · cold at {new Date(cacheStart! + ttl).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</Text>
+            {stage.icon} {clock(left)} <Text dimColor>{isNew}ttl {ttlLabel} · cold at {new Date(cacheStart! + ttl).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</Text>
           </Text>
         ) : (
           <Text color="#61afef">
