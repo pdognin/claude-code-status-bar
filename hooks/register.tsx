@@ -172,6 +172,19 @@ function cols(node: RenderChildren): number {
   return widths.reduce((a, w) => a + w, 0) + gap
 }
 
+// cuts text to n columns, ending it in … when it had to cut
+function clip(text: string, n: number): string {
+  if (cols(text) <= n) return text
+  let [out, w] = ['', 0]
+  for (const { segment } of graphemes.segment(text)) {
+    const sw = WIDE.test(segment) ? 2 : 1
+    if (w + sw > n - 1) break
+    out += segment
+    w += sw
+  }
+  return `${out}…`
+}
+
 const SLOW_MS = 15000
 const VERY_SLOW_MS = 30000
 
@@ -451,13 +464,15 @@ export const register: Register = on => {
     // the connection and last-prompt extras when their line overflows, and a tip that would cover the switches
     const width = (e.props as { bodyColumns?: number }).bodyColumns ?? Infinity
     const fits = (...parts: RenderChildren[]) => parts.reduce((a: number, p) => a + cols(p), 0) + parts.length - 1 <= width
-    // the bottom row: the tip of the hovered field on the left, the switches on the right
+    // the bottom row: the tip of the hovered field on the left, cut to the room beside the switches
+    // (a hover cannot make the row taller), and the switches on the right
+    const tipRoom = width - cols(switches) - 1
     const bottom = (
       <Box height={1} justifyContent="space-between">
         <Box>
-          {Object.entries(TIPS).filter(([, doc]) => fits(doc, switches)).map(([id, doc]) => (
+          {tipRoom >= 10 && Object.entries(TIPS).map(([id, doc]) => (
             <Box key={`t-${id}`} position="absolute" top={0} left={0} display="none" hover={{ scope: `tip-${id}`, display: 'flex' }}>
-              <Text dimColor italic>{doc}</Text>
+              <Text dimColor italic>{clip(doc, tipRoom)}</Text>
             </Box>
           ))}
         </Box>
