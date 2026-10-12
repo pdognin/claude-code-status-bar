@@ -41,6 +41,8 @@ export type NetStats = {
   recent: number[]
   lastError?: string
   lastErrorAt?: number
+  /** when a network check first failed; cleared by a reply or a check that gets through */
+  offlineAt?: number
 }
 
 /** Per tool name: [succeeded, failed or denied]. */

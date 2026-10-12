@@ -33,7 +33,7 @@ const TIPS: Record<string, string> = {
   cache_ttl: 'Cache time left before cold. Click: TTL 5m/1h.',
   totals: 'Whole session: prompts, tool calls, averages, top tools.',
   net_title: 'Model API connection stats.',
-  net_health: 'Connection: ● ok, ◐ slow, ✕ stalled/errors, ○ idle.',
+  net_health: 'Connection: ● ok, ◐ slow, ✕ offline/stalled/errors, ○ idle.',
   net_last: "Live wait on the model API, or the last request's time.",
   net_ttft: 'Time to first token of the last request.',
   net_avg: 'Average of the last 10 model requests.',
@@ -87,7 +87,7 @@ const LABELS: Record<string, string> = {
   cache_ttl: 'prompt cache: time to cold 🔥💨💧🧊 · ttl',
   totals: 'session totals',
   net_title: 'model API connection',
-  net_health: 'state: ok, slow, stalled, errors, idle',
+  net_health: 'state: ok, slow, offline, stalled, errors, idle',
   net_last: 'last request, or live wait',
   net_ttft: 'time to first token',
   net_avg: 'average of last 10',
@@ -144,7 +144,7 @@ const DOCS: Record<string, string> = {
   sw_bar: 'Show or hide this whole status bar (remembered across sessions). The buttons stay so you can bring it back.',
   sw_line: 'Show or hide the classic status line from ~/.claude/statusline.sh (remembered across sessions).',
   answer: 'Length of the last answer, in characters (k = thousands).',
-  net_health: 'Connection state: ● ok, ◐ slow (a request past 15s with no first token yet, or the last request was slow), ✕ stalled with how long it has waited (no first token after 30s), ✕ errors (an error in the last 10 minutes), ○ idle before any request.',
+  net_health: 'Connection state: ✕ offline with how long (a request got no reply for 3s and a check of the API host failed; checked every 5s until it gets through), ● ok, ◐ slow (a request past 15s with no first token yet, or the last request was slow), ✕ stalled with how long it has waited (no first token after 30s), ✕ errors (an error in the last 10 minutes), ○ idle before any request.',
   speed: 'Output speed of the last prompt: output tokens per second while the model was streaming. Tool time is not counted.',
   grow: 'How much the context grew during the last prompt. ⟲ compacted means the context shrank, so it was compacted.',
 }
@@ -157,6 +157,9 @@ let promptSeq = 0
 const openRequests = new Map<number, { startedAt: number; firstAt?: number }>()
 let requestSeq = 0
 let ticker: { cancel: () => void } | undefined
+// the network check: when it last ran, and whether one is still out
+let probeAt = 0
+let isProbing = false
 const TTLS = [5 * 60000, 60 * 60000]
 
 const figures = atom({ plugin: 'status-bar', key: 'figures' } as const, null)
@@ -287,6 +290,12 @@ function clip(text: string, n: number): string {
 
 const SLOW_MS = 15000
 const VERY_SLOW_MS = 30000
+// A request with no reply for PROBE_AFTER_MS starts a network check, repeated every PROBE_EVERY_MS
+// while the wait or the outage lasts; a check with no answer in PROBE_TIMEOUT_MS counts as offline.
+const PROBE_AFTER_MS = 3000
+const PROBE_EVERY_MS = 5000
+const PROBE_TIMEOUT_MS = 4000
+const PROBE_URL = 'https://api.anthropic.com/'
 
 const short = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${n}`)
 
@@ -343,6 +352,26 @@ async function refreshFigures($: EngineInterface) {
   return cost?.usd
 }
 
+// The network check: while a request waits with no reply, or after a check failed, fetch the
+// API's host now and then. Any HTTP answer means the network is up; an error or no answer
+// in time marks the connection offline until a reply or a later check says otherwise.
+const probe = async ($: EngineInterface) => {
+  const now = await $.clock.now()
+  const n = await read($, net)
+  const isWaiting = n.inflight !== undefined && n.firstAt === undefined && now - n.inflight > PROBE_AFTER_MS
+  if (isProbing || (!isWaiting && n.offlineAt === undefined) || now - probeAt < PROBE_EVERY_MS) return
+  isProbing = true
+  probeAt = now
+  try {
+    const timeout = $.clock.sleep(PROBE_TIMEOUT_MS).then(() => false)
+    const isUp = await Promise.race([$.http.fetch(PROBE_URL, { method: 'HEAD' }).then(() => true, () => false), timeout])
+    const at = await $.clock.now()
+    await update($, net, x => (isUp ? { ...x, offlineAt: undefined } : { ...x, offlineAt: x.offlineAt ?? at }))
+  } finally {
+    isProbing = false
+  }
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     $.ui.status(undefined)
@@ -360,7 +389,10 @@ export const register: Register = on => {
     await update($, cacheTtl, () => (TTLS.includes(savedTtl) ? savedTtl : TTLS[0]!))
     await refreshFigures($).catch(() => undefined)
     ticker?.cancel()
-    ticker = $.clock.every(1000, () => update($, tick, n => n + 1))
+    ticker = $.clock.every(1000, async () => {
+      await update($, tick, n => n + 1)
+      await probe($)
+    })
     return next(e)
   })
 
@@ -443,11 +475,19 @@ export const register: Register = on => {
       for (;;) {
         const step = await stream.next()
         if (step.done) {
+          // no reply at all, retries exhausted: a failure, though the stream did not throw
+          if (step.value.stopReason === null && open.firstAt === undefined && !next.signal.aborted) {
+            isFailed = true
+            const at = await $.clock.now()
+            await update($, net, n => ({ ...n, errors: n.errors + 1, lastError: 'no reply from the model API', lastErrorAt: at }))
+          }
           return step.value
         }
-        if (open.firstAt === undefined) {
+        // engine chunks (the envelope, a retry marker) come without the network too:
+        // only the model's own text, thinking or tool call is a first token
+        if (open.firstAt === undefined && step.value.kind !== 'engine') {
           open.firstAt = await $.clock.now()
-          await update($, net, show)
+          await update($, net, n => show({ ...n, offlineAt: undefined }))
         }
         yield step.value
       }
@@ -706,8 +746,10 @@ export const register: Register = on => {
     const started = nPrompts > 0 || n.reqs > 0 || n.inflight !== undefined || t != null
     const stalled = n.inflight !== undefined && n.firstAt === undefined && (waiting ?? 0) > VERY_SLOW_MS
     const slowNow = n.inflight !== undefined && n.firstAt === undefined && (waiting ?? 0) > SLOW_MS
+    const isOffline = n.offlineAt !== undefined
     const health =
-      stalled ? { text: `✕ stalled ${duration(waiting ?? 0)}`, color: '#e06c75' }
+      isOffline ? { text: `✕ offline ${duration(now - n.offlineAt!)}`, color: '#e06c75' }
+      : stalled ? { text: `✕ stalled ${duration(waiting ?? 0)}`, color: '#e06c75' }
       : slowNow || (n.lastMs ?? 0) > SLOW_MS ? { text: '◐ slow', color: '#e5c07b' }
       : recentErr ? { text: '✕ errors', color: '#e06c75' }
       : n.reqs > 0 ? { text: '● ok', color: '#98c379' }
@@ -719,7 +761,7 @@ export const register: Register = on => {
         waiting !== undefined ? (
           <Text color={netColor}>
             {waiting > SLOW_MS ? '🐌' : '⏳'} {n.firstAt === undefined ? 'waiting' : 'streaming'} {duration(waiting)}
-            {n.firstAt === undefined && waiting > SLOW_MS ? ' — provider slow?' : ''}
+            {n.firstAt === undefined && !isOffline && waiting > SLOW_MS ? ' — provider slow?' : ''}
           </Text>
         ) : (
           <Text color={netColor}>{recentErr ? '🔴 ' : ''}{n.lastMs !== undefined ? duration(n.lastMs) : '0.0s'}</Text>
