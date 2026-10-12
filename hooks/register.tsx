@@ -55,20 +55,64 @@ const TIPS: Record<string, string> = {
   tools: "This prompt's tools by count; ✓ ok, ✗ failed (red).",
   sw_bar: 'Show or hide this bar (remembered).',
   sw_line: 'Show or hide the classic status line (remembered).',
-  sw_help: 'Print what every field means (same as /bar-help).',
+  sw_help: 'Help mode: click a section to explain each of its fields.',
 }
 
-// /bar-help: the fields row by row, each with its full explanation from DOCS
-const HELP: { title: string; ids: string[] }[] = [
-  { title: 'Top row', ids: ['clock', 'model', 'dir', 'branch', 'five', 'weekly'] },
-  { title: 'Context row', ids: ['ctx', 'cost', 'session', 'cache_ttl', 'totals'] },
-  { title: 'Connection row', ids: ['net_title', 'net_health', 'net_last', 'net_ttft', 'net_avg', 'net_max', 'net_req', 'net_slow', 'net_failed', 'net_err'] },
-  { title: 'Last-prompt row', ids: ['last_title', 'time', 'pmodel', 'turn', 'why', 'tokens', 'speed', 'grow', 'cache', 'answer', 'tools'] },
+// /bar-help: the fields row by row, each with its full explanation from DOCS.
+// In help mode a row is split into its left-aligned section and its right-aligned one (`right`),
+// and a click on a field explains its section.
+const HELP: { title: string; row?: string; right?: string[]; ids: string[] }[] = [
+  { title: 'Top row', row: 'top', right: ['five', 'weekly'], ids: ['clock', 'model', 'dir', 'branch', 'five', 'weekly'] },
+  { title: 'Context row', row: 'ctx', right: ['totals'], ids: ['ctx', 'cost', 'session', 'cache_ttl', 'totals'] },
+  { title: 'Connection row', row: 'net', ids: ['net_title', 'net_health', 'net_last', 'net_ttft', 'net_avg', 'net_max', 'net_req', 'net_slow', 'net_failed', 'net_err'] },
+  { title: 'Last-prompt row', row: 'last', right: ['tools'], ids: ['last_title', 'time', 'pmodel', 'turn', 'why', 'tokens', 'speed', 'grow', 'cache', 'answer', 'tools'] },
   { title: 'Switches', ids: ['sw_bar', 'sw_line', 'sw_help'] },
 ]
+// a field's section: "<row>-l" or "<row>-r"
+const SECTION_OF = new Map(
+  HELP.flatMap(g => (g.row === undefined ? [] : g.ids.map(id => [id, `${g.row}-${g.right?.includes(id) ? 'r' : 'l'}`] as const))),
+)
+
+// help mode: the label drawn after each field of the explained row
+const LABELS: Record<string, string> = {
+  clock: 'current time',
+  model: 'session model',
+  dir: 'working dir',
+  branch: 'git branch',
+  five: '5-hour limit used · resets in',
+  weekly: 'weekly limit used · cost this week · resets in',
+  ctx: 'context used · tokens / max',
+  cost: 'session cost',
+  session: 'session time',
+  cache_ttl: 'prompt cache: time to cold 🔥💨💧🧊 · ttl',
+  totals: 'session totals',
+  net_title: 'model API connection',
+  net_health: 'state: ok, slow, stalled, errors, idle',
+  net_last: 'last request, or live wait',
+  net_ttft: 'time to first token',
+  net_avg: 'average of last 10',
+  net_max: 'slowest of last 10',
+  net_req: 'requests',
+  net_slow: 'over 15s',
+  net_failed: 'failed requests',
+  net_err: 'last error',
+  last_title: 'last prompt',
+  time: 'submitted at',
+  pmodel: 'answered by',
+  turn: 'wall time [engine time] · cost',
+  why: 'why it ended',
+  tokens: 'tokens in / out',
+  speed: 'output speed',
+  grow: 'context growth',
+  cache: 'input from cache · written',
+  answer: 'answer length',
+  tools: 'tools this prompt · ✓ ok ✗ failed',
+}
+// help mode backgrounds: a section that a click explains, the field under the pointer, the explained section
+const TINT = { row: '#2c313a', hover: '#3e4451', picked: '#4b5263' }
 
 const DOCS: Record<string, string> = {
-  sw_help: 'Prints this help into the transcript, the same as /bar-help.',
+  sw_help: 'Turns help mode on or off. In help mode the left and right sections of each row are tinted; click one and each of its fields is shown with a label under the bar. The context bar and the cache field only explain while help mode is on.',
   time: 'Time your last prompt was submitted.',
   clock: 'The current time, ticking every second.',
   net_title: 'Connection stats: the model API link.',
@@ -139,6 +183,9 @@ const interrupts = atom({ plugin: 'status-bar', key: 'interrupts' } as const, 0)
 const running = atom({ plugin: 'status-bar', key: 'running' } as const, false)
 // the running or last prompt found no warm cache, so its first request wrote a new one
 const cacheNew = atom({ plugin: 'status-bar', key: 'cacheNew' } as const, false)
+// help mode, and the row it explains (none until a row is clicked)
+const helpOn = atom({ plugin: 'status-bar', key: 'helpOn' } as const, false)
+const helpSection = atom({ plugin: 'status-bar', key: 'helpSection' } as const, null)
 
 function gradient(t: number): string {
   const stops = (PALETTES[activePalette % PALETTES.length] ?? PALETTES[0]!).stops
@@ -194,7 +241,11 @@ function summarize(counts: Record<string, [number, number]>) {
 
 // keeps only the fields whose ids are listed, in their order (a field node's key is "f-<id>")
 function keep<T>(nodes: T[], ids: string[]): T[] {
-  return nodes.filter(n => ids.includes(String((n as unknown as { key?: unknown } | null)?.key ?? '').replace(/^f-/, '')))
+  const keyOf = (n: T) => {
+    const el = n as unknown as { key?: unknown; props?: { key?: unknown } } | null
+    return String(el?.props?.key ?? el?.key ?? '')
+  }
+  return nodes.filter(n => ids.includes(keyOf(n).replace(/^f-/, '')))
 }
 
 // a character a terminal draws two columns wide: emoji (an emoji-presentation one, or any followed by
@@ -490,7 +541,7 @@ export const register: Register = on => {
     }
 
     const { Box, Text, Button } = $.ui.resolve(e)
-    const [isBar, isLine] = [await read($, barOn), await read($, lineOn)]
+    const [isBar, isLine, isHelp, picked] = [await read($, barOn), await read($, lineOn), await read($, helpOn), await read($, helpSection)]
     const setLine = async () => {
       const enable = !isLine
       await $.process.run(['sh', '-c', `mkdir -p ~/.claude && printf %s ${enable ? 'on' : 'off'} > ~/.claude/statusline.state`])
@@ -509,6 +560,14 @@ export const register: Register = on => {
         <Box key="hv-line" hover={{ scope: 'tip-sw_line' }}>
           <Button key="sw-line" plain onPress={setLine}>
             <Text dimColor>[line {isLine ? '●' : '○'}]</Text>
+          </Button>
+        </Box>
+        <Box key="hv-help" hover={{ scope: 'tip-sw_help' }}>
+          <Button key="sw-help" plain onPress={async () => {
+            await update($, helpOn, () => !isHelp)
+            await update($, helpSection, () => null)
+          }}>
+            <Text dimColor>[help {isHelp ? '●' : '○'}]</Text>
           </Button>
         </Box>
       </Box>
@@ -552,10 +611,22 @@ export const register: Register = on => {
     await read($, tick) // redraw every second for the countdown
     const [t, promptAt, now, isRunning] = [await read($, lastTurn), await read($, lastPrompt), await $.clock.now(), await read($, running)]
 
-    // A hoverable field: hovering it lights the tip with the same id.
+    // help mode: a click on a field explains its section, and a second click on that section hides it
+    const pick = (id: string) => async () => {
+      const section = SECTION_OF.get(id) ?? null
+      await update($, helpSection, s => (s === section ? null : section))
+    }
+    // A hoverable field: hovering it lights the tip with the same id. In help mode it is also
+    // clickable (a field that is already a button explains from its own press) and lit under the pointer.
     const field = (id: string, node: RenderChildren) => (
-      <Box key={`f-${id}`} hover={{ scope: `tip-${id}` }}>
-        {node}
+      <Box key={`f-${id}`} hover={isHelp ? { scope: `tip-${id}`, backgroundColor: TINT.hover } : { scope: `tip-${id}` }}>
+        {isHelp && (node as { type?: string } | null)?.type !== 'Button' ? (
+          <Button key={`h-${id}`} plain onPress={pick(id)}>
+            {node}
+          </Button>
+        ) : (
+          node
+        )}
       </Box>
     )
     // A line of fields, the absent ones skipped and the rest set apart by bars.
@@ -592,6 +663,7 @@ export const register: Register = on => {
     const isNew = (await read($, cacheNew)) ? 'new · ' : ''
     const cacheNode = (
       <Button key="ttl" plain onPress={async () => {
+        if (isHelp) return pick('cache_ttl')()
         const chosen = ttl === TTLS[0] ? TTLS[1]! : TTLS[0]!
         await $.store.set('cacheTtl', chosen)
         await update($, cacheTtl, () => chosen)
@@ -725,6 +797,7 @@ export const register: Register = on => {
 
     const bar = (
       <Button key="bar" plain onPress={async () => {
+        if (isHelp) return pick('ctx')()
         const chosen = (activePalette + 1) % PALETTES.length
         await $.store.set('palette', chosen)
         await update($, palette, () => chosen)
@@ -776,6 +849,60 @@ export const register: Register = on => {
           field('answer', <Text dimColor>💬 {short(t?.answerChars ?? 0)}</Text>),
     ]
 
+    // help mode: the fields of a drawn row, in order, found by their boxes' "f-<id>" keys
+    type Drawn = { type: string; key?: unknown; props?: Record<string, unknown>; children?: RenderChildren[] }
+    const fieldsOf = (node: RenderChildren, out: { id: string; body: RenderChildren }[] = []) => {
+      if (node === null || typeof node !== 'object') return out
+      if (Array.isArray(node)) {
+        for (const n of node) fieldsOf(n, out)
+        return out
+      }
+      const el = node as Drawn
+      const key = String(el.props?.key ?? el.key ?? '')
+      if (el.type === 'Box' && key.startsWith('f-')) out.push({ id: key.slice(2), body: el.children ?? [] })
+      else for (const c of el.children ?? []) fieldsOf(c, out)
+      return out
+    }
+    // buttons drawn again as plain text, so the explanation holds no second press of the same key
+    const unbutton = (node: RenderChildren): RenderChildren => {
+      if (Array.isArray(node)) return node.map(unbutton)
+      const el = node as Drawn | null
+      return el?.type === 'Button' ? <Text>{(el.children ?? []).map(unbutton)}</Text> : node
+    }
+    // help mode, under the bar: the explained section's fields again, each followed by its label,
+    // wrapped a whole field at a time to the body width, at most four lines
+    const explain = (section: RenderChildren) => {
+      if (section === null) return <Text dimColor italic>help: click a section to explain its fields; [help ●] to leave</Text>
+      const items = fieldsOf(section).map(({ id, body }) => (
+        <Box>
+          <Text>{unbutton(body)}</Text>
+          <Text dimColor italic> ({LABELS[id] ?? id})</Text>
+        </Box>
+      ))
+      const lines: RenderChildren[][] = []
+      let used = 0
+      for (const item of items) {
+        const w = cols(item)
+        const last = lines[lines.length - 1]
+        if (last !== undefined && used + 3 + w <= width) {
+          last.push(<Text dimColor> | </Text>, item)
+          used += 3 + w
+        } else {
+          lines.push([item])
+          used = w
+        }
+      }
+      const shown = lines.slice(0, 4)
+      if (lines.length > 4) shown[3]!.push(<Text dimColor> …</Text>)
+      return (
+        <Box flexDirection="column" backgroundColor={TINT.picked}>
+          {shown.map(l => (
+            <Box>{l}</Box>
+          ))}
+        </Box>
+      )
+    }
+
     // Each row takes the widest version of itself that fits the body width.
     const top = line(
       field('clock', <Text dimColor>🕰️ {new Date(now).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</Text>),
@@ -810,14 +937,32 @@ export const register: Register = on => {
     // the tools chips go before the last-prompt extras do
     const lastRight = fits(lastLine, toolsNode) ? toolsNode : null
 
+    // the sections a click in help mode explains, each row's left and right parts
+    const sections: Record<string, RenderChildren> = {
+      'top-l': top,
+      'top-r': topRight,
+      'ctx-l': ctxLine,
+      'ctx-r': ctxRight,
+      'net-l': netLine,
+      'last-l': lastLine,
+      'last-r': lastRight,
+    }
+    // help mode tints each section on its own, the explained one the most,
+    // so the gap between a row's two sections stays untinted
+    const tinted = (id: string) => {
+      const node = sections[id] ?? null
+      return isHelp && node ? <Box backgroundColor={picked === id ? TINT.picked : TINT.row}>{node}</Box> : node
+    }
+
     return (
       <Box flexDirection="column">
         {rule}
-        {split(top, topRight)}
-        {split(ctxLine, ctxRight)}
-        {netLine}
-        {split(lastLine, lastRight)}
+        {split(tinted('top-l'), tinted('top-r'))}
+        {split(tinted('ctx-l'), tinted('ctx-r'))}
+        {tinted('net-l')}
+        {split(tinted('last-l'), tinted('last-r'))}
         {bottom}
+        {isHelp && explain(picked === null ? null : (sections[picked] ?? null))}
       </Box>
     )
   })
