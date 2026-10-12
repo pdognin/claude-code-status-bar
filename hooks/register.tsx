@@ -19,7 +19,56 @@ const REASONS: Record<string, string | undefined> = {
   error: '⚠️ error',
 }
 // What each field shows, drawn on the line under the bar while it is hovered.
+// the hover tips: short enough to fit beside the switches; /bar-help prints the full DOCS
 const TIPS: Record<string, string> = {
+  clock: 'Current time.',
+  model: 'Model answering this session.',
+  dir: 'Current working directory.',
+  branch: 'Current git branch.',
+  five: 'Five-hour limit: share used, time to reset.',
+  weekly: 'Weekly limit: share used, cost this week, time to reset.',
+  ctx: 'Context window used. Click: next color palette.',
+  cost: 'Session cost so far.',
+  session: 'Time since the session started.',
+  cache_ttl: 'Cache time left before cold. Click: TTL 5m/1h.',
+  totals: 'Whole session: prompts, tool calls, averages, top tools.',
+  net_title: 'Model API connection stats.',
+  net_health: 'Connection: ● ok, ◐ slow, ✕ stalled/errors, ○ idle.',
+  net_last: "Live wait on the model API, or the last request's time.",
+  net_ttft: 'Time to first token of the last request.',
+  net_avg: 'Average of the last 10 model requests.',
+  net_max: 'Slowest of the last 10 model requests.',
+  net_req: 'Model requests this session.',
+  net_slow: 'Requests that took over 15 seconds.',
+  net_failed: 'Requests that failed (your interrupts not counted).',
+  net_err: 'Last error and how long ago (shown 10 min).',
+  last_title: 'Stats for the last prompt.',
+  time: 'When the last prompt was submitted.',
+  pmodel: "Model that answered, when not the session's.",
+  turn: 'Wall time [engine time] · cost; counts up while running.',
+  why: 'Why the turn ended: interrupt, refusal or API error.',
+  tokens: "Last turn's tokens: ↑ input (incl. cache), ↓ output.",
+  speed: 'Output tokens per second while streaming.',
+  grow: 'Context growth this prompt; ⟲ = compacted.',
+  cache: 'Input share served from cache; wrote = new cache.',
+  answer: 'Length of the last answer, in characters.',
+  tools: "This prompt's tools by count; ✓ ok, ✗ failed (red).",
+  sw_bar: 'Show or hide this bar (remembered).',
+  sw_line: 'Show or hide the classic status line (remembered).',
+  sw_help: 'Print what every field means (same as /bar-help).',
+}
+
+// /bar-help: the fields row by row, each with its full explanation from DOCS
+const HELP: { title: string; ids: string[] }[] = [
+  { title: 'Top row', ids: ['clock', 'model', 'dir', 'branch', 'five', 'weekly'] },
+  { title: 'Context row', ids: ['ctx', 'cost', 'session', 'cache_ttl', 'totals'] },
+  { title: 'Connection row', ids: ['net_title', 'net_health', 'net_last', 'net_ttft', 'net_avg', 'net_max', 'net_req', 'net_slow', 'net_failed', 'net_err'] },
+  { title: 'Last-prompt row', ids: ['last_title', 'time', 'pmodel', 'turn', 'why', 'tokens', 'speed', 'grow', 'cache', 'answer', 'tools'] },
+  { title: 'Switches', ids: ['sw_bar', 'sw_line', 'sw_help'] },
+]
+
+const DOCS: Record<string, string> = {
+  sw_help: 'Prints this help into the transcript, the same as /bar-help.',
   time: 'Time your last prompt was submitted.',
   clock: 'The current time, ticking every second.',
   net_title: 'Connection stats: the model API link.',
@@ -248,6 +297,7 @@ export const register: Register = on => {
     $.ui.status(undefined)
     await $.command.register({ name: 'context-pane', description: 'Open the context breakdown pane' })
     await $.command.register({ name: 'context-pane-close', description: 'Close the context breakdown pane' })
+    await $.command.register({ name: 'bar-help', description: 'Explain every field of the status bar', immediate: true })
     // the classic status line script (~/.claude/statusline.sh) stays quiet while this file says off
     const flag = await $.process.run(['sh', '-c', 'cat ~/.claude/statusline.state 2>/dev/null'])
     await update($, lineOn, () => flag.stdout.trim() !== 'off')
@@ -278,6 +328,10 @@ export const register: Register = on => {
     await $.ui.close({ id: PANE })
     return { text: 'Context pane closed.' }
   })
+
+  on('command.run', { command: 'bar-help' }, async () => ({
+    text: HELP.map(g => [`${g.title}`, ...g.ids.map(id => `  ${id}: ${DOCS[id] ?? TIPS[id] ?? ''}`)].join('\n')).join('\n\n'),
+  }))
 
   on('prompt.submit', async ($, e, next) => {
     const at = await $.clock.now()
